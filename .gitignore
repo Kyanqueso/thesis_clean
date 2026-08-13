@@ -1,0 +1,32 @@
+# Python virtual environment
+venv/
+/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE and editor folders
+.vscode/
+.idea/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# --- PROJECT SPECIFIC ---
+
+# Data files is large.
+data/
+
+# Generated embeddings ( very large)
+embeddings/
+
+# Per-pipeline / per-ablation-mode run outputs (very large)
+runs/
+
+# API Keys and secrets - VERY IMPORTANT
+.env
+*.env
+
+
