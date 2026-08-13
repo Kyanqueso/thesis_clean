@@ -95,7 +95,7 @@ MODELS = {
     },
     "qwen3": {
         "model_id": "Qwen/Qwen3-Embedding-4B",
-        "batch_size": 128,
+        "batch_size": 16,
         "embed_type": "sbert",
         "enabled": True,
         "description": "Qwen3-Embedding-4B (2560 dims)"
@@ -234,6 +234,13 @@ def main():
             
         except Exception as e:
             print(f"  ❌ Error generating embeddings for '{key}': {e}")
+        finally:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
 
     print("\n\n🎉🎉🎉 Embedding generation completed! 🎉🎉🎉")
     
