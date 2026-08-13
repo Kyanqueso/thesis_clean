@@ -99,7 +99,7 @@ MODELS = {
     },
     "qwen3": {
         "model_id": "Qwen/Qwen3-Embedding-4B",
-        "batch_size": 16,
+        "batch_size": 4,
         "embed_type": "sbert",
         "dtype": "float16",
         "enabled": True,
