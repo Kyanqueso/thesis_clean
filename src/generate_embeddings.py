@@ -8,6 +8,8 @@ into a single text.
 
 import argparse
 import os
+import subprocess
+import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -15,6 +17,7 @@ from tqdm import tqdm
 
 # Attempt to import required libraries and provide guidance on failure.
 try:
+    import torch
     from sentence_transformers import SentenceTransformer
     from openai import OpenAI
     from dotenv import load_dotenv
@@ -52,10 +55,11 @@ def get_tokenizer(model_id: str) -> tiktoken.Encoding:
         print(f"⚠️ Warning: Tokenizer for '{model_id}' not found. Using 'cl100k_base'.")
         return tiktoken.get_encoding("cl100k_base")
 
-def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_type: str) -> np.ndarray:
-   
+def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_type: str, dtype: str = None) -> np.ndarray:
+
     if embed_type == 'sbert':
-        model = SentenceTransformer(model_id)
+        model_kwargs = {"torch_dtype": getattr(torch, dtype)} if dtype else None
+        model = SentenceTransformer(model_id, model_kwargs=model_kwargs)
         return model.encode(
             texts,
             batch_size=batch_size,
@@ -97,6 +101,7 @@ MODELS = {
         "model_id": "Qwen/Qwen3-Embedding-4B",
         "batch_size": 16,
         "embed_type": "sbert",
+        "dtype": "float16",
         "enabled": True,
         "description": "Qwen3-Embedding-4B (2560 dims)"
     },
@@ -151,6 +156,7 @@ def main():
         default=None,
         help=f"Comma-separated subset of models to run ({', '.join(MODELS.keys())}). Default: all."
     )
+    parser.add_argument("--_single", type=str, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
     EMBED_DIR = args.embed_dir
     EMBED_DIR.mkdir(parents=True, exist_ok=True)
@@ -164,6 +170,51 @@ def main():
         for key in MODELS:
             if key not in selected:
                 MODELS[key]["enabled"] = False
+
+    # --- Orchestration: run each model in its own isolated subprocess ---
+    # A CUDA OOM can leave a process's CUDA context permanently broken (not just
+    # fragmented), so running every model in-process risks one crash cascading
+    # into the next model even with cache clearing. Each model gets a fresh
+    # interpreter/CUDA context instead; --_single marks the actual worker call.
+    if args._single is None:
+        print("\n🚀 Starting embedding generation (each model runs in its own subprocess)...")
+        for key, config in MODELS.items():
+            if not config["enabled"]:
+                print(f"\n🟡 Skipping '{key}' model (disabled).")
+                continue
+
+            output_path = EMBED_DIR / f"{key}_prompt.npy"
+            if output_path.exists() and not args.force:
+                print(f"\n--- ⏳ {key.upper()}: embeddings already exist. Use --force to overwrite. ---")
+                continue
+
+            print(f"\n--- ⏳ Launching subprocess for: {key.upper()} ---")
+            cmd = [
+                sys.executable, str(Path(__file__).resolve()),
+                "--data", str(args.data),
+                "--mode", args.mode,
+                "--embed-dir", str(EMBED_DIR),
+                "--separator", args.separator,
+                "--models", key,
+                "--_single", key,
+            ]
+            if args.force:
+                cmd.append("--force")
+            result = subprocess.run(cmd)
+            if result.returncode != 0:
+                print(f"  ❌ Subprocess for '{key}' exited with code {result.returncode}.")
+
+        print("\n\n🎉🎉🎉 Embedding generation completed! 🎉🎉🎉")
+        print("\n📁 Summary of embedding files:")
+        for key, config in MODELS.items():
+            if config["enabled"]:
+                output_path = EMBED_DIR / f"{key}_prompt.npy"
+                if output_path.exists():
+                    size_mb = output_path.stat().st_size / 1e6
+                    print(f"   ✔️  {output_path.name:<25} ({size_mb:.2f} MB)")
+                else:
+                    print(f"   ❌ {output_path.name:<25} (generation failed or skipped)")
+        return
 
     # --- Data Loading and Validation ---
     if not args.data.is_file():
@@ -224,7 +275,8 @@ def main():
                 texts=combined_texts,
                 model_id=config["model_id"],
                 batch_size=config["batch_size"],
-                embed_type=config["embed_type"]
+                embed_type=config["embed_type"],
+                dtype=config.get("dtype")
             )
             
             np.save(output_path, embeddings)
