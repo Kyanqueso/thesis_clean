@@ -55,11 +55,13 @@ def get_tokenizer(model_id: str) -> tiktoken.Encoding:
         print(f"⚠️ Warning: Tokenizer for '{model_id}' not found. Using 'cl100k_base'.")
         return tiktoken.get_encoding("cl100k_base")
 
-def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_type: str, dtype: str = None) -> np.ndarray:
+def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_type: str, dtype: str = None, max_seq_length: int = None) -> np.ndarray:
 
     if embed_type == 'sbert':
         model_kwargs = {"torch_dtype": getattr(torch, dtype)} if dtype else None
         model = SentenceTransformer(model_id, model_kwargs=model_kwargs)
+        if max_seq_length:
+            model.max_seq_length = max_seq_length
         return model.encode(
             texts,
             batch_size=batch_size,
@@ -102,6 +104,7 @@ MODELS = {
         "batch_size": 4,
         "embed_type": "sbert",
         "dtype": "float16",
+        "max_seq_length": 2048,
         "enabled": True,
         "description": "Qwen3-Embedding-4B (2560 dims)"
     },
@@ -276,7 +279,8 @@ def main():
                 model_id=config["model_id"],
                 batch_size=config["batch_size"],
                 embed_type=config["embed_type"],
-                dtype=config.get("dtype")
+                dtype=config.get("dtype"),
+                max_seq_length=config.get("max_seq_length")
             )
             
             np.save(output_path, embeddings)
