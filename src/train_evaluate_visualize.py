@@ -73,7 +73,7 @@ def get_classifiers() -> dict:
     classifiers = {
         "RandomForest": RandomForestClassifier(n_estimators=100, random_state=SEED, n_jobs=-1, max_depth=10),
         "LogisticRegression": make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000, random_state=SEED, n_jobs=-1)),
-        "SVM": make_pipeline(StandardScaler(), CalibratedClassifierCV(LinearSVC(dual=False, max_iter=5000, random_state=SEED), cv=5, n_jobs=-1))
+        "SVM": make_pipeline(StandardScaler(), CalibratedClassifierCV(LinearSVC(dual=False, max_iter=1000, tol=1e-3, random_state=SEED), cv=5, n_jobs=-1))
     }
     if HAS_XGB:
         classifiers["XGBoost"] = XGBClassifier(n_estimators=100, random_state=SEED, n_jobs=-1, eval_metric="logloss", verbosity=0)
