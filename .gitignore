@@ -19,14 +19,15 @@ Thumbs.db
 # Data files is large.
 data/
 
-# Generated embeddings ( very large)
+# Generated embeddings (very large)
 embeddings/
 
 # Per-pipeline / per-ablation-mode run outputs (very large)
 runs/
 
-# API Keys and secrets - VERY IMPORTANT
+# API Keys and secrets
 .env
 *.env
 
+personal.txt
 
