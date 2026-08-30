@@ -1,0 +1,141 @@
+{
+    "best_configuration": {
+        "Classifier": "SVM",
+        "Accuracy": 0.9045,
+        "F1-Score": 0.9030667730007975,
+        "ROC-AUC": 0.9685669387755103,
+        "PR-AUC": 0.9724435678337836,
+        "Train-Time(s)": 61.14827060699463,
+        "Inference-Time-Total(s)": 1.6668410301208496,
+        "Test-Samples": 14000,
+        "Embeddings": "QWEN3",
+        "Inference-Time-per-Sample(ms)": 0.1190600735800607
+    },
+    "all_results": [
+        {
+            "Classifier": "SVM",
+            "Accuracy": 0.9045,
+            "F1-Score": 0.9030667730007975,
+            "ROC-AUC": 0.9685669387755103,
+            "PR-AUC": 0.9724435678337836,
+            "Train-Time(s)": 61.14827060699463,
+            "Inference-Time-Total(s)": 1.6668410301208496,
+            "Test-Samples": 14000,
+            "Embeddings": "QWEN3",
+            "Inference-Time-per-Sample(ms)": 0.1190600735800607
+        },
+        {
+            "Classifier": "LogisticRegression",
+            "Accuracy": 0.9032142857142857,
+            "F1-Score": 0.9022295980951006,
+            "ROC-AUC": 0.9681831836734693,
+            "PR-AUC": 0.9720751562699298,
+            "Train-Time(s)": 26.208332538604736,
+            "Inference-Time-Total(s)": 0.6552839279174805,
+            "Test-Samples": 14000,
+            "Embeddings": "QWEN3",
+            "Inference-Time-per-Sample(ms)": 0.0468059948512486
+        },
+        {
+            "Classifier": "XGBoost",
+            "Accuracy": 0.8010714285714285,
+            "F1-Score": 0.7967894928858081,
+            "ROC-AUC": 0.887237887755102,
+            "PR-AUC": 0.8986311329348877,
+            "Train-Time(s)": 20.657707452774048,
+            "Inference-Time-Total(s)": 0.13010597229003906,
+            "Test-Samples": 14000,
+            "Embeddings": "QWEN3",
+            "Inference-Time-per-Sample(ms)": 0.00929328373500279
+        },
+        {
+            "Classifier": "LightGBM",
+            "Accuracy": 0.7891428571428571,
+            "F1-Score": 0.7812685240071132,
+            "ROC-AUC": 0.8728172244897959,
+            "PR-AUC": 0.8838986407824063,
+            "Train-Time(s)": 9.801167488098145,
+            "Inference-Time-Total(s)": 0.13120436668395996,
+            "Test-Samples": 14000,
+            "Embeddings": "QWEN3",
+            "Inference-Time-per-Sample(ms)": 0.009371740477425712
+        },
+        {
+            "Classifier": "RandomForest",
+            "Accuracy": 0.7353571428571428,
+            "F1-Score": 0.7346938775510204,
+            "ROC-AUC": 0.8250203673469388,
+            "PR-AUC": 0.8320517796294311,
+            "Train-Time(s)": 10.70952844619751,
+            "Inference-Time-Total(s)": 0.1954948902130127,
+            "Test-Samples": 14000,
+            "Embeddings": "QWEN3",
+            "Inference-Time-per-Sample(ms)": 0.013963920729500907
+        },
+        {
+            "Classifier": "XGBoost",
+            "Accuracy": 0.7074285714285714,
+            "F1-Score": 0.7024553247130612,
+            "ROC-AUC": 0.7907764183673469,
+            "PR-AUC": 0.7979845056905344,
+            "Train-Time(s)": 2.478898525238037,
+            "Inference-Time-Total(s)": 0.002451658248901367,
+            "Test-Samples": 14000,
+            "Embeddings": "MINILM",
+            "Inference-Time-per-Sample(ms)": 0.00017511844635009766
+        },
+        {
+            "Classifier": "SVM",
+            "Accuracy": 0.7120714285714286,
+            "F1-Score": 0.7067723867025533,
+            "ROC-AUC": 0.7897795408163265,
+            "PR-AUC": 0.799669678003136,
+            "Train-Time(s)": 9.461768865585327,
+            "Inference-Time-Total(s)": 0.09080076217651367,
+            "Test-Samples": 14000,
+            "Embeddings": "MINILM",
+            "Inference-Time-per-Sample(ms)": 0.006485768726893834
+        },
+        {
+            "Classifier": "LogisticRegression",
+            "Accuracy": 0.7122142857142857,
+            "F1-Score": 0.706960506218634,
+            "ROC-AUC": 0.789473806122449,
+            "PR-AUC": 0.7999589390503725,
+            "Train-Time(s)": 3.3661961555480957,
+            "Inference-Time-Total(s)": 0.022755861282348633,
+            "Test-Samples": 14000,
+            "Embeddings": "MINILM",
+            "Inference-Time-per-Sample(ms)": 0.0016254186630249023
+        },
+        {
+            "Classifier": "LightGBM",
+            "Accuracy": 0.7058571428571428,
+            "F1-Score": 0.699766695829688,
+            "ROC-AUC": 0.7848944591836735,
+            "PR-AUC": 0.794951225016796,
+            "Train-Time(s)": 1.3092718124389648,
+            "Inference-Time-Total(s)": 0.005749940872192383,
+            "Test-Samples": 14000,
+            "Embeddings": "MINILM",
+            "Inference-Time-per-Sample(ms)": 0.0004107100622994559
+        },
+        {
+            "Classifier": "RandomForest",
+            "Accuracy": 0.6834285714285714,
+            "F1-Score": 0.6831569917071776,
+            "ROC-AUC": 0.7609405,
+            "PR-AUC": 0.7653709667313706,
+            "Train-Time(s)": 4.397301912307739,
+            "Inference-Time-Total(s)": 0.04740190505981445,
+            "Test-Samples": 14000,
+            "Embeddings": "MINILM",
+            "Inference-Time-per-Sample(ms)": 0.003385850361415318
+        }
+    ],
+    "info": {
+        "test_size": 0.2,
+        "seed": 42,
+        "average_inference_time_ms": 0.02105778796332223
+    }
+}
