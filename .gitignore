@@ -14,16 +14,11 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# --- PROJECT SPECIFIC ---
-
-# Data files is large.
+# Data files is too large.
 data/
 
-# Generated embeddings (very large)
+# Generated embeddings also too large
 embeddings/
-
-# Per-pipeline / per-ablation-mode run outputs (very large)
-runs/
 
 # API Keys and secrets
 .env
