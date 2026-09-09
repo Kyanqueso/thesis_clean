@@ -97,40 +97,52 @@ def load_data(data_path: Path) -> pd.DataFrame | None:
     return df
 
 # --- Leakage Guard ---
-def resolve_leakage(doc_ids: np.ndarray, train_idx: np.ndarray, test_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Ensures no doc_id appears on both sides of the split by moving the minority-side
-    occurrences of any shared doc_id onto the majority side, then re-verifying until clean."""
-    print("\n🛡️  Leakage guard: checking for shared doc_id across train/test split...")
-    train_idx, test_idx = list(train_idx), list(test_idx)
-    rounds, total_moved = 0, 0
+def split_by_doc(df: pd.DataFrame, indices: np.ndarray, test_size: float,
+                 seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Pick the train/test split, in priority order:
 
-    while True:
-        train_docs, test_docs = {}, {}
-        for i in train_idx:
-            train_docs.setdefault(doc_ids[i], []).append(i)
-        for i in test_idx:
-            test_docs.setdefault(doc_ids[i], []).append(i)
+      1. a `split` column stamped at build time (--disjoint-attacks datasets)
+      2. grouped on the document TEXT, so every copy of a document stays together
+      3. a plain label-stratified row split
 
-        shared = set(train_docs) & set(test_docs)
-        if not shared:
-            break
+    Grouping keeps every row of a document on the same side of the boundary.
 
-        rounds += 1
-        for doc_id in shared:
-            t_rows, v_rows = train_docs[doc_id], test_docs[doc_id]
-            if len(t_rows) >= len(v_rows):
-                for i in v_rows:
-                    test_idx.remove(i)
-                    train_idx.append(i)
-                    total_moved += 1
-            else:
-                for i in t_rows:
-                    train_idx.remove(i)
-                    test_idx.append(i)
-                    total_moved += 1
+    Pipeline 3 uses each document twice — once clean, once injected — so a
+    row-level split could put one twin in train and the other in test, and the
+    model would be scored on a document it had already memorized. Splitting on
+    documents makes that impossible by construction rather than repairing it
+    afterwards, and it costs no test rows.
 
-    print(f"   - Resolved after {rounds} round(s), moved {total_moved} row(s). 0 shared doc_id remain between train/test.")
-    return np.array(train_idx), np.array(test_idx)
+    Datasets without doc_id (pipelines 1 and 2) keep the plain label-stratified
+    row split, unchanged. Under the twin design stratification is automatic: each
+    document contributes exactly one benign and one malicious row to its side.
+    """
+    # A dataset built with --disjoint-attacks decided train/test at build time,
+    # because each side had to draw from its own BIPIA attack pool. Honor it:
+    # re-splitting here would hand test attack types back to the training set.
+    if "split" in df.columns:
+        in_train = (df["split"] == "train").to_numpy()
+        print(f"\n🛡️  Build-time split: {df.loc[in_train, 'doc_id'].nunique():,} train / "
+              f"{df.loc[~in_train, 'doc_id'].nunique():,} test documents"
+              f" — test attack types were held out when the dataset was built.")
+        return indices[in_train], indices[~in_train]
+
+    if "doc_id" not in df.columns:
+        return train_test_split(indices, test_size=test_size,
+                                stratify=df["label"].values, random_state=seed)
+
+    # Group by the clean TEXT where we have it, not by id. A document's twins
+    # share it, and so do repeated documents carrying different doc_ids (CoSQA
+    # tops its pool up with repeats). Grouping on doc_id alone would let a
+    # repeat sit in train and test at once.
+    key = df["original_context"] if "original_context" in df.columns else df["doc_id"]
+    groups = pd.factorize(key)[0]
+    uniq = np.unique(groups)
+    train_groups = train_test_split(uniq, test_size=test_size, random_state=seed)[0]
+    in_train = np.isin(groups, train_groups)
+    print(f"\n🛡️  Grouped split: {len(train_groups):,} train / {len(uniq) - len(train_groups):,}"
+          f" test distinct documents — no document text on both sides.")
+    return indices[in_train], indices[~in_train]
 
 # --- Core Logic ---
 def train_evaluate(X_train, y_train, X_test, y_test, classifier, name):
@@ -301,14 +313,11 @@ def main():
     y = df["label"].values
     indices = np.arange(len(y))
 
-    # Split data indices
-    train_idx, test_idx = train_test_split(indices, test_size=args.test_size, stratify=y, random_state=SEED)
-    print(f"\nSplitting data: {len(train_idx)} train, {len(test_idx)} test samples.")
-
-    # Leakage guard: only pipeline 3's dataset has a doc_id column
-    if "doc_id" in df.columns:
-        train_idx, test_idx = resolve_leakage(df["doc_id"].values, train_idx, test_idx)
-        print(f"   - Post-guard split: {len(train_idx)} train, {len(test_idx)} test samples.")
+    # Split: by doc_id where present (pipeline 3's clean/injected twins),
+    # otherwise the plain label-stratified row split.
+    train_idx, test_idx = split_by_doc(df, indices, args.test_size, SEED)
+    print(f"\nSplitting data: {len(train_idx):,} train, {len(test_idx):,} test samples "
+          f"({y[test_idx].mean():.1%} malicious in test).")
 
     y_train, y_test = y[train_idx], y[test_idx]
 

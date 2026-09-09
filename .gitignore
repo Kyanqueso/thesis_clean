@@ -32,7 +32,9 @@ runs_from_vastai/
 *.env
 
 personal.txt
-
+/.claude
 
 # Supervisor-delivered artifacts (runs/ is a junction into this)
 Thesis Artifacts/
+
+/thesis4-master

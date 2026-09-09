@@ -1,20 +1,3 @@
-"""
-Organic Dataset Construction Script
-====================================
-Pulls organic (non-LLM-generated) content from five public sources — MS MARCO v2.1,
-FeTaQA, CoSQA, Enron Email, and CNN/DailyMail — and builds two datasets:
-
-  Output A (pipeline 2): data/organic_bipia_dataset.jsonl
-    35k BIPIA-malicious rows (reused from data/final_training_dataset.jsonl) +
-    35k organic benign rows (7k/source). Same 4 columns as the Alamsabi dataset.
-
-  Output B (pipeline 3): data/organic_injected_dataset.jsonl
-    70k organic rows (FeTaQA 10k, others 15k each). Half of each source's pool is
-    injected using BIPIA's own insertion mechanism (insert_start/insert_middle/
-    insert_end, reimplemented from microsoft/BIPIA's bipia/data/utils.py) and real
-    attack instructions pulled from BIPIA's benchmark/text_attack_{train,test}.json.
-"""
-
 import argparse
 import json
 import random
@@ -41,10 +24,15 @@ from pipeline_paths import DATA_DIR, DATASETS  # noqa: E402
 
 PIPELINE2_N_PER_SOURCE = 7000
 
-BIPIA_ATTACK_URLS = [
-    "https://raw.githubusercontent.com/microsoft/BIPIA/main/benchmark/text_attack_train.json",
-    "https://raw.githubusercontent.com/microsoft/BIPIA/main/benchmark/text_attack_test.json",
-]
+# BIPIA attack instruction pool is downloaded once and cached in the organic dataset's output directory.
+BIPIA_RAW_BASE = "https://raw.githubusercontent.com/microsoft/BIPIA/main/benchmark"
+ATTACK_FILES = {
+    ("text", "train"): "text_attack_train.json",
+    ("text", "test"): "text_attack_test.json",
+    ("code", "train"): "code_attack_train.json",
+    ("code", "test"): "code_attack_test.json",
+}
+ATTACK_SUBDIR = "attacks"
 
 CNN_TEMPLATES = [
     "Summarize this article in a few sentences.",
@@ -72,20 +60,61 @@ def usable_length(text: str, min_len: int, max_len: int) -> bool:
     return bool(text) and min_len <= len(text.strip()) <= max_len
 
 
-# --- BIPIA Attack Pool ---
-def fetch_attack_pool() -> list[tuple[str, str]]:
-    """Fetch BIPIA's real attack-instruction pool: list of (instruction, category)."""
-    pool = []
-    for url in BIPIA_ATTACK_URLS:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        for category, instructions in data.items():
-            for instr in instructions:
-                pool.append((instr, category))
-    if not pool:
-        raise RuntimeError("Failed to fetch any BIPIA attack instructions.")
-    return pool
+def _topup(rows: list[dict], dupes: list[dict], n: int, label: str) -> list[dict]:
+    """Prefer distinct documents; if a source runs out of them, top up with
+    repeats rather than returning short.
+
+    Repeats are safe here because the train/test split groups rows by CONTENT,
+    not by doc_id — two copies of the same text always land on the same side, so
+    the model can never be tested on a document it trained on. CoSQA is the only
+    source that needs this (~6.1k distinct functions against a 7k target).
+    """
+    if len(rows) < n and dupes:
+        need = min(n - len(rows), len(dupes))
+        print(f"  ↻ {label}: {len(rows):,} distinct documents; adding {need:,} "
+              f"repeats to reach {n:,}")
+        rows = rows + dupes[:need]
+    return rows[:n]
+
+
+# --- BIPIA Attack Pools ---
+def load_attack_pools(attack_dir: Path, refresh: bool = False,
+                      strict: bool = True) -> dict[tuple[str, str], list[tuple[str, str]]]:
+    """{(kind, part): [(instruction, attack_category), ...]} for kind in
+    text/code and part in train/test.
+
+    Each file is downloaded once into attack_dir and read from disk thereafter,
+    so a rebuild needs no network and is pinned to the cached copy.
+
+    `strict` drops from each TEST pool any attack category that also appears in
+    the matching TRAIN pool. BIPIA ships exactly one such overlap on the text
+    side ("Language Translation"); the code pools are already disjoint. This
+    only matters when the pools are used separately (--disjoint-attacks).
+    """
+    attack_dir.mkdir(parents=True, exist_ok=True)
+    pools: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for (kind, part), name in ATTACK_FILES.items():
+        path = attack_dir / name
+        if refresh or not path.is_file():
+            resp = requests.get(f"{BIPIA_RAW_BASE}/{name}", timeout=30)
+            resp.raise_for_status()
+            path.write_bytes(resp.content)
+            print(f"   ↓ cached {name} ({len(resp.content):,} bytes)")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        pool = [(instr, category) for category, instrs in data.items() for instr in instrs]
+        if not pool:
+            raise RuntimeError(f"No BIPIA {kind}/{part} attack instructions in {attack_dir}")
+        pools[(kind, part)] = pool
+
+    if strict:
+        for kind in ("text", "code"):
+            train_cats = {c for _, c in pools[(kind, "train")]}
+            kept = [(i, c) for i, c in pools[(kind, "test")] if c not in train_cats]
+            n_dropped = len({c for _, c in pools[(kind, "test")]}) - len({c for _, c in kept})
+            if n_dropped:
+                print(f"   · {kind}: dropped {n_dropped} test attack type(s) also present in train")
+            pools[(kind, "test")] = kept
+    return pools
 
 
 # --- BIPIA Insertion Functions (reimplemented from bipia/data/utils.py) ---
@@ -121,7 +150,7 @@ def pull_ms_marco(n: int, seed: int) -> list[dict]:
     print(f"  Pulling MS MARCO v2.1 (target {n:,} rows)...")
     ds = load_dataset("microsoft/ms_marco", "v2.1", split="train", streaming=True)
     ds = ds.shuffle(seed=seed, buffer_size=20000)
-    rows = []
+    rows, dupes, seen = [], [], set()
     for i, row in enumerate(tqdm(ds, desc="MS MARCO", total=n)):
         query = (row.get("query") or "").strip()
         passages = row.get("passages") or {}
@@ -133,11 +162,16 @@ def pull_ms_marco(n: int, seed: int) -> list[dict]:
         passage = (passage or "").strip()
         if not usable_length(passage, 150, 6000):
             continue
-        doc_id = f"ms_marco_{row.get('query_id', i)}"
-        rows.append({"doc_id": doc_id, "context": passage, "user_intent": query})
+        entry = {"doc_id": f"ms_marco_{row.get('query_id', i)}",
+                 "context": passage, "user_intent": query}
+        if passage in seen:
+            dupes.append(entry)
+            continue
+        seen.add(passage)
+        rows.append(entry)
         if len(rows) >= n:
             break
-    return rows
+    return _topup(rows, dupes, n, "MS MARCO v2.1")
 
 
 def flatten_table(table_array) -> str:
@@ -149,7 +183,7 @@ def pull_fetaqa(n: int, seed: int) -> list[dict]:
     print(f"  Pulling FeTaQA (target {n:,} rows)...")
     ds = load_dataset("DongfuJiang/FeTaQA")
     combined = concatenate_datasets([ds["train"], ds["validation"], ds["test"]])
-    rows = []
+    rows, dupes, seen = [], [], set()
     for i, row in enumerate(tqdm(combined, desc="FeTaQA")):
         question = (row.get("question") or "").strip()
         table_array = row.get("table_array")
@@ -158,101 +192,169 @@ def pull_fetaqa(n: int, seed: int) -> list[dict]:
         table_text = flatten_table(table_array)
         if not usable_length(table_text, 50, 8000):
             continue
-        doc_id = f"fetaqa_{row.get('feta_id', i)}"
-        rows.append({"doc_id": doc_id, "context": table_text, "user_intent": question})
+        entry = {"doc_id": f"fetaqa_{row.get('feta_id', i)}",
+                 "context": table_text, "user_intent": question}
+        if table_text in seen:
+            dupes.append(entry)
+            continue
+        seen.add(table_text)
+        rows.append(entry)
         if len(rows) >= n:
             break
-    return rows
+    return _topup(rows, dupes, n, "FeTaQA")
 
 
 def pull_cosqa(n: int, seed: int) -> list[dict]:
     print(f"  Pulling CoSQA (target {n:,} rows)...")
     ds = load_dataset("gonglinyuan/CoSQA", split="train")
-    rows = []
+    rows, dupes, seen = [], [], set()
     for i, row in enumerate(tqdm(ds, desc="CoSQA")):
         code = (row.get("code") or "").strip()
         intent = (row.get("docstring_tokens") or "").strip()
         if not code or not intent or not usable_length(code, 20, 6000):
             continue
-        doc_id = f"cosqa_{row.get('idx', i)}"
-        rows.append({"doc_id": doc_id, "context": code, "user_intent": intent})
+        entry = {"doc_id": f"cosqa_{row.get('idx', i)}",
+                 "context": code, "user_intent": intent}
+        if code in seen:
+            dupes.append(entry)
+            continue
+        seen.add(code)
+        rows.append(entry)
         if len(rows) >= n:
             break
-    return rows
+    return _topup(rows, dupes, n, "CoSQA")
 
 
 def pull_enron(n: int, seed: int) -> list[dict]:
     print(f"  Pulling Enron Email (target {n:,} rows)...")
     ds = load_dataset("corbt/enron-emails", split="train", streaming=True)
     ds = ds.shuffle(seed=seed, buffer_size=20000)
-    rows = []
+    rows, dupes, seen = [], [], set()
     for i, row in enumerate(tqdm(ds, desc="Enron", total=n)):
         body = (row.get("body") or "").strip()
         subject = (row.get("subject") or "").strip()
         if len(subject) < 3 or not usable_length(body, 200, 5000):
             continue
-        doc_id = f"enron_{row.get('message_id', i)}"
-        rows.append({"doc_id": doc_id, "context": body, "user_intent": subject})
+        entry = {"doc_id": f"enron_{row.get('message_id', i)}",
+                 "context": body, "user_intent": subject}
+        if body in seen:
+            dupes.append(entry)
+            continue
+        seen.add(body)
+        rows.append(entry)
         if len(rows) >= n:
             break
-    return rows
+    return _topup(rows, dupes, n, "Enron Email")
 
 
 def pull_cnn_dailymail(n: int, seed: int) -> list[dict]:
     print(f"  Pulling CNN/DailyMail (target {n:,} rows)...")
     ds = load_dataset("abisee/cnn_dailymail", "3.0.0", split="train", streaming=True)
     ds = ds.shuffle(seed=seed, buffer_size=20000)
-    rows = []
+    rows, dupes, seen = [], [], set()
     for i, row in enumerate(tqdm(ds, desc="CNN/DailyMail", total=n)):
         article = (row.get("article") or "").strip()[:6000]
         if not usable_length(article, 200, 6000):
             continue
-        doc_id = f"cnn_dailymail_{row.get('id', i)}"
-        user_intent = CNN_TEMPLATES[len(rows) % len(CNN_TEMPLATES)]
-        rows.append({"doc_id": doc_id, "context": article, "user_intent": user_intent})
+        entry = {"doc_id": f"cnn_dailymail_{row.get('id', i)}", "context": article,
+                 "user_intent": CNN_TEMPLATES[len(rows) % len(CNN_TEMPLATES)]}
+        if article in seen:
+            dupes.append(entry)
+            continue
+        seen.add(article)
+        rows.append(entry)
         if len(rows) >= n:
             break
-    return rows
+    return _topup(rows, dupes, n, "CNN/DailyMail")
 
 
-# --- Source Registry ---
+# --- Source Datasets (Organic) ---
+# attack_kind picks which BIPIA pool a source's injections come from: prose gets
+# text attacks, CoSQA gets BIPIA's code attacks (a text attack appended to a
+# Python function is not what a code-assistant injection looks like).
+# pipeline3_n is a DOCUMENT target: each document becomes two rows (clean +
+# injected), so 7,000 docs/source -> 14,000 rows/source. Pools prefer distinct
+# documents and only repeat when a source runs dry — CoSQA has ~6,130 distinct
+# functions, so ~870 of its 7,000 are repeats (see _topup).
 SOURCES = {
-    "ms_marco": {"display": "MS MARCO v2.1", "pipeline3_n": 15000, "pull": pull_ms_marco},
-    "fetaqa": {"display": "FeTaQA", "pipeline3_n": 10000, "pull": pull_fetaqa},
-    "cosqa": {"display": "CoSQA", "pipeline3_n": 15000, "pull": pull_cosqa},
-    "enron": {"display": "Enron Email", "pipeline3_n": 15000, "pull": pull_enron},
-    "cnn_dailymail": {"display": "CNN/DailyMail", "pipeline3_n": 15000, "pull": pull_cnn_dailymail},
+    "ms_marco": {"display": "MS MARCO v2.1", "pipeline3_n": 7000, "pull": pull_ms_marco, "attack_kind": "text"},
+    "fetaqa": {"display": "FeTaQA", "pipeline3_n": 7000, "pull": pull_fetaqa, "attack_kind": "text"},
+    "cosqa": {"display": "CoSQA", "pipeline3_n": 7000, "pull": pull_cosqa, "attack_kind": "code"},
+    "enron": {"display": "Enron Email", "pipeline3_n": 7000, "pull": pull_enron, "attack_kind": "text"},
+    "cnn_dailymail": {"display": "CNN/DailyMail", "pipeline3_n": 7000, "pull": pull_cnn_dailymail, "attack_kind": "text"},
 }
 
 
 # --- Dataset Builders ---
-def build_pipeline3(pools: dict, rng: random.Random, attack_pool: list[tuple[str, str]]) -> list[dict]:
+def _p3_row(r: dict, display: str, context: str, label: int, instruction=None,
+            position=None, category=None, split=None) -> dict:
+    """One pipeline-3 row. A document's two rows share doc_id, user_intent and
+    original_context; only `context` and the attack fields differ. `split` is
+    only written under --disjoint-attacks, where train/test must be decided at
+    build time so each side can draw from its own attack pool."""
+    row = {
+        "doc_id": r["doc_id"],
+        "category": display,
+        "context": context,
+        "user_intent": r["user_intent"],
+        "original_context": r["context"],
+        "label": label,
+        "attack_instruction": instruction,
+        "injection_position": position,
+        "attack_category": category,
+    }
+    if split is not None:
+        row["split"] = split
+    return row
+
+
+def build_pipeline3(pools: dict, rng: random.Random, attack_pools: dict,
+                    disjoint_attacks: bool = True,
+                    train_frac: float = 0.8) -> list[dict]:
+    """Twin design: every document is used twice, once clean and once injected.
+
+    Because the same document carries both labels, its length, topic, vocabulary
+    and intent are balanced across the classes exactly rather than on average —
+    the injected instruction is the only thing a classifier can key on.
+    7,000 documents/source -> 14,000 rows/source.
+
+    disjoint_attacks decides where the injections come from:
+
+    - True (default): documents are assigned train/test here, and each side
+      draws only from its own BIPIA pool (25 train types vs 24 test types, zero
+      overlap). The assignment is written to a `split` column that
+      train_evaluate_visualize.py honors, so the run measures generalization to
+      attack types the model has NEVER seen — the deployment condition.
+    - False (--merged-attacks): every document draws from BIPIA's train AND test
+      pools combined, so test attacks are also seen during training. Only useful
+      as the "known attacks" comparison run.
+    """
     rows_out = []
     for key, pool in pools.items():
         display = SOURCES[key]["display"]
-        pool_ids = [r["doc_id"] for r in pool]
-        half = len(pool_ids) // 2
-        injected_ids = set(rng.sample(pool_ids, half)) if half else set()
-        for r in pool:
-            row = {
-                "doc_id": r["doc_id"],
-                "category": display,
-                "context": r["context"],
-                "user_intent": r["user_intent"],
-                "original_context": r["context"],
-                "label": 0,
-                "attack_instruction": None,
-                "injection_position": None,
-                "attack_category": None,
-            }
-            if r["doc_id"] in injected_ids:
-                injected_text, instruction, position, category = inject_row(r["context"], rng, attack_pool)
-                row["context"] = injected_text
-                row["label"] = 1
-                row["attack_instruction"] = instruction
-                row["injection_position"] = position
-                row["attack_category"] = category
-            rows_out.append(row)
+        kind = SOURCES[key]["attack_kind"]
+        if disjoint_attacks:
+            attack_for = {p: attack_pools[(kind, p)] for p in ("train", "test")}
+        else:
+            merged = attack_pools[(kind, "train")] + attack_pools[(kind, "test")]
+            attack_for = {"train": merged, "test": merged}
+
+        docs = list(pool)
+        rng.shuffle(docs)
+        # Assign train/test per DISTINCT text, not per doc_id: a pool topped up
+        # with repeats holds the same text under two ids, and both copies must
+        # land on the same side or the model is tested on what it trained on.
+        texts = list(dict.fromkeys(r["context"] for r in docs))
+        n_train = round(len(texts) * train_frac)
+        part_of = {t: ("train" if i < n_train else "test") for i, t in enumerate(texts)}
+        for r in docs:
+            part = part_of[r["context"]]
+            split = part if disjoint_attacks else None
+            injected, instruction, position, category = inject_row(
+                r["context"], rng, attack_for[part])
+            rows_out.append(_p3_row(r, display, r["context"], 0, split=split))
+            rows_out.append(_p3_row(r, display, injected, 1, instruction,
+                                    position, category, split=split))
     rng.shuffle(rows_out)
     return rows_out
 
@@ -262,21 +364,30 @@ def build_pipeline2(pools: dict, rng: random.Random, alamsabi_path: Path, pipeli
     alamsabi_df = pd.read_json(alamsabi_path, lines=True)
     bipia_df = alamsabi_df[alamsabi_df["source"] == "BIPIA"]
     malicious_rows = bipia_df[["context", "user_intent", "label", "source"]].to_dict("records")
-    print(f"    - {len(malicious_rows):,} BIPIA malicious rows found")
+    print(f"    - {len(malicious_rows):,} BIPIA malicious rows available")
 
     benign_rows = []
     for key, pool in pools.items():
         display = SOURCES[key]["display"]
         n = min(pipeline2_n, len(pool))
-        sample = rng.sample(pool, n)
-        for r in sample:
+        if n < pipeline2_n:
+            print(f"    ⚠️ {display}: only {n:,} unique documents (wanted {pipeline2_n:,})")
+        for r in rng.sample(pool, n):
             benign_rows.append({
                 "context": r["context"],
                 "user_intent": r["user_intent"],
                 "label": 0,
                 "source": display,
             })
-    print(f"    - {len(benign_rows):,} organic benign rows sampled ({pipeline2_n:,}/source)")
+    print(f"    - {len(benign_rows):,} organic benign rows sampled (target {pipeline2_n:,}/source)")
+
+    # Balance 1:1 by downsampling the malicious side. Never pad the benign side,
+    # which would mean repeating a document — exactly the duplication the pools
+    # are deduplicated to avoid.
+    if len(malicious_rows) > len(benign_rows):
+        print(f"    - downsampling malicious {len(malicious_rows):,} -> "
+              f"{len(benign_rows):,} for a 1:1 balance")
+        malicious_rows = rng.sample(malicious_rows, len(benign_rows))
 
     all_rows = malicious_rows + benign_rows
     rng.shuffle(all_rows)
@@ -304,7 +415,17 @@ def main():
     parser.add_argument("--alamsabi-data", type=Path, default=None,
                          help="Path to the existing Alamsabi dataset (default: <out-dir>/%s)."
                               % DATASETS["pipeline1_alamsabi"])
+    parser.add_argument("--refresh-attacks", action="store_true",
+                         help="Re-download BIPIA's attack pools instead of reusing the cached copies.")
+    parser.add_argument("--merged-attacks", action="store_true",
+                         help="Pipeline 3: draw injections from BIPIA's train AND test attack pools "
+                              "combined, so test attack types are also seen during training. The "
+                              "default holds the test pool out; use this only to build the "
+                              "'known attacks' comparison run.")
+    parser.add_argument("--train-frac", type=float, default=0.8,
+                         help="Pipeline 3: fraction of documents assigned to train at build time.")
     args = parser.parse_args()
+    disjoint_attacks = not args.merged_attacks
 
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -325,9 +446,15 @@ def main():
         pipeline3_targets = {k: v["pipeline3_n"] for k, v in SOURCES.items()}
         pipeline2_n = PIPELINE2_N_PER_SOURCE
 
-    print("🔄 Fetching BIPIA attack instruction pool...")
-    attack_pool = fetch_attack_pool()
-    print(f"   - {len(attack_pool):,} attack instructions loaded")
+    print("🔄 Loading BIPIA attack instruction pools...")
+    attack_pools = load_attack_pools(out_dir / ATTACK_SUBDIR, refresh=args.refresh_attacks)
+    for (kind, part), pool in sorted(attack_pools.items()):
+        print(f"   - {kind}/{part}: {len(pool):,} instructions, "
+              f"{len({c for _, c in pool})} attack types")
+    if disjoint_attacks:
+        print("   ⚡ held-out attacks (default): test documents get attack types never seen in training")
+    else:
+        print("   ⚠️ --merged-attacks: test attack types are ALSO seen during training")
 
     print("\n🚀 Pulling organic sources...")
     pools = {}
@@ -338,10 +465,19 @@ def main():
             print(f"  ⚠️ Warning: only found {len(rows):,}/{n:,} usable rows for '{key}'")
         pools[key] = rows
 
-    print("\n🧩 Building pipeline 3 dataset (organic + self-injected)...")
-    pipeline3_rows = build_pipeline3(pools, rng, attack_pool)
+    print("\n🧩 Building pipeline 3 dataset (organic, each document clean + injected)...")
+    pipeline3_rows = build_pipeline3(pools, rng, attack_pools,
+                                     disjoint_attacks=disjoint_attacks,
+                                     train_frac=args.train_frac)
     n_injected = sum(1 for r in pipeline3_rows if r["label"] == 1)
-    print(f"   - {len(pipeline3_rows):,} total rows ({n_injected:,} injected, {len(pipeline3_rows) - n_injected:,} clean)")
+    n_docs = len({r["doc_id"] for r in pipeline3_rows})
+    print(f"   - {len(pipeline3_rows):,} rows from {n_docs:,} documents "
+          f"({n_injected:,} injected, {len(pipeline3_rows) - n_injected:,} clean)")
+    if disjoint_attacks:
+        tr = {r["attack_category"] for r in pipeline3_rows if r["split"] == "train" and r["label"] == 1}
+        te = {r["attack_category"] for r in pipeline3_rows if r["split"] == "test" and r["label"] == 1}
+        print(f"   - attack types: {len(tr)} train / {len(te)} test, "
+              f"{len(tr & te)} shared  (0 = test attacks are unseen)")
     write_jsonl(pipeline3_rows, out_dir / DATASETS["pipeline3_organic_injected"])
 
     print("\n🧩 Building pipeline 2 dataset (organic benign + Alamsabi BIPIA malicious)...")
