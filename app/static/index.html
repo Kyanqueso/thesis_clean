@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>thesis_clean dashboard</title>
+<link rel="stylesheet" href="/static/style.css?v=9">
+</head>
+<body>
+<header>
+  <h1>Prompt-Injection Detection</h1>
+  <nav>
+    <button class="tab-btn active" data-tab="runs">Runs</button>
+    <button class="tab-btn" data-tab="results">Results</button>
+    <button class="tab-btn" data-tab="detect">Detect</button>
+    <button class="tab-btn" data-tab="files">Files</button>
+  </nav>
+  <div id="queue-pill" class="pill">idle</div>
+</header>
+
+<main>
+<!-- ============ RUNS TAB ============ -->
+<section class="tab active" id="tab-runs">
+  <div class="grid-2">
+    <div class="card">
+      <h2>Datasets</h2>
+      <div class="muted mono" id="paths-line"></div>
+      <table class="plain" id="datasets-table"></table>
+      <div class="row gap">
+        <button class="btn small" id="b-ds-alamsabi">Download P1 dataset (HF)</button>
+        <button class="btn small" id="b-ds-organic">Build P2 + P3 datasets</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Launch</h2>
+      <div class="row wrap gap">
+        <label class="field"><span>Pipeline</span><select id="f-pipeline"></select></label>
+        <label class="field"><span>Mode</span><select id="f-mode">
+          <option value="normal">normal</option>
+          <option value="user_intent_only">user_intent_only</option>
+          <option value="context_only">context_only</option>
+        </select></label>
+        <label class="field"><span>Limit (rows)</span><input type="number" id="f-limit" placeholder="all" min="1"></label>
+      </div>
+      <div class="field"><span>Embeddings</span>
+        <div class="checks">
+          <label class="chip-toggle"><input type="checkbox" class="f-model" value="openai"><span>openai</span></label>
+          <label class="chip-toggle"><input type="checkbox" class="f-model" value="qwen3"><span>qwen3</span></label>
+          <label class="chip-toggle"><input type="checkbox" class="f-model" value="minilm" checked><span>minilm</span></label>
+        </div>
+      </div>
+      <div class="field"><span>Options</span>
+        <div class="checks">
+          <label class="chip-toggle"><input type="checkbox" id="f-force"><span>force re-embed</span></label>
+          <label class="chip-toggle"><input type="checkbox" id="f-save-models" checked><span>save models</span></label>
+          <label class="chip-toggle"><input type="checkbox" id="f-skip-proj"><span>skip projections</span></label>
+        </div>
+      </div>
+      <div class="row gap">
+        <button class="btn primary" id="b-run">Queue run</button>
+        <button class="btn" id="b-sweep">Queue FULL sweep (9 runs)</button>
+        <span class="msg" id="launch-msg"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Run matrix <span class="muted">— pipeline × ablation mode · E embeddings · R results · F figures · M models</span></h2>
+    <table class="plain" id="matrix-table"></table>
+    <p class="muted" id="matrix-note" style="display:none"></p>
+  </div>
+
+  <div class="card">
+    <h2>Jobs</h2>
+    <table class="plain" id="jobs-table"></table>
+    <pre id="job-log" class="log" style="display:none"></pre>
+  </div>
+</section>
+
+<!-- ============ RESULTS TAB ============ -->
+<section class="tab" id="tab-results">
+  <div class="pipe-chips" id="pipe-chips"></div>
+  <div class="card" id="no-results-card" style="display:none">
+    <h2>No results yet</h2>
+    <p class="muted">No <code>runs/*/*/results/full_evaluation_results.csv</code> found.
+    Launch a run from the Runs tab (a smoke run with limit≈500 + minilm finishes in minutes),
+    or drop your supervisor's <code>runs/</code> folder into the repo root.</p>
+  </div>
+
+  <div class="card" id="headline-card">
+    <h2>Headline <span class="muted">— best configuration per run (by ROC-AUC)</span></h2>
+    <div class="scroll"><table id="headline-table"></table></div>
+  </div>
+
+  <div class="card" id="ablation-card">
+    <h2>Ablation <span class="muted">— best ROC-AUC per mode: does the signal come from the context, the intent, or the pair?</span></h2>
+    <div class="scroll"><table id="ablation-table"></table></div>
+  </div>
+
+  <div class="card" id="allrows-card">
+    <h2>All runs</h2>
+    <div class="row wrap gap" id="results-filters">
+      <label class="field"><span>Pipeline</span><select id="rf-pipeline"><option value="">all</option></select></label>
+      <label class="field"><span>Mode</span><select id="rf-mode"><option value="">all</option></select></label>
+      <label class="field"><span>Embeddings</span><select id="rf-emb"><option value="">all</option></select></label>
+      <label class="field"><span>Classifier</span><select id="rf-clf"><option value="">all</option></select></label>
+      <span class="muted" id="rf-count"></span>
+    </div>
+    <div class="scroll"><table id="results-table"></table></div>
+  </div>
+
+  <div class="card" id="figures-card">
+    <h2>Static figures <span class="muted">— PNGs written by the pipeline for the selected run</span></h2>
+    <div class="row wrap gap">
+      <label class="field"><span>Run</span><select id="fig-run"></select></label>
+    </div>
+    <div id="figures-list" class="figures"></div>
+  </div>
+</section>
+
+<!-- ============ DETECT TAB ============ -->
+<section class="tab" id="tab-detect">
+  <div class="card">
+    <h2>Live detection</h2>
+    <p class="muted" id="detect-note"></p>
+    <div class="row wrap gap">
+      <label class="field grow"><span>Model</span><select id="d-model"></select></label>
+      <label class="field"><span>Sample from</span><select id="d-sample-pipeline"></select></label>
+      <button class="btn small" id="b-sample">Load random dataset row</button>
+    </div>
+    <label class="field"><span>User intent</span>
+      <textarea id="d-intent" rows="2" placeholder="e.g. Summarize the following article."></textarea></label>
+    <label class="field"><span>External content (context)</span>
+      <textarea id="d-context" rows="10" placeholder="Paste the retrieved document / email / web page here…"></textarea></label>
+    <div class="row gap">
+      <button class="btn primary" id="b-detect">Detect</button>
+      <span class="msg" id="detect-msg"></span>
+    </div>
+    <div id="detect-result" style="display:none">
+      <div class="verdict-row">
+        <div id="verdict-badge" class="verdict"></div>
+        <div class="gauge"><div id="gauge-fill"></div></div>
+        <div id="gauge-label" class="gauge-label"></div>
+      </div>
+      <div class="muted" id="detect-timing"></div>
+      <div class="muted" id="detect-truth"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FILES TAB ============ -->
+<section class="tab" id="tab-files">
+  <div class="card">
+    <h2>Artifact explorer <span class="muted">— every file the pipeline schema expects, present or missing, plus anything extra found on disk</span></h2>
+    <div id="files-list"><span class="muted">Loading…</span></div>
+  </div>
+  <div class="card" id="peek-card">
+    <h2>Dataset peek <span class="muted">— random labeled rows straight from the jsonl files</span></h2>
+    <div class="row wrap gap">
+      <label class="field"><span>Dataset</span><select id="pk-pipeline"></select></label>
+      <label class="field"><span>Rows</span><select id="pk-n">
+        <option>5</option><option selected>10</option><option>25</option>
+      </select></label>
+      <button class="btn small" id="pk-resample">Resample</button>
+      <span class="msg" id="pk-msg"></span>
+    </div>
+    <div class="scroll"><table id="peek-table"></table></div>
+  </div>
+
+  <div class="card" id="file-preview-card" style="display:none">
+    <h2 id="file-preview-title" style="font-family:var(--mono)"></h2>
+    <div id="file-preview"></div>
+  </div>
+</section>
+</main>
+
+<script src="/static/app.js?v=7"></script>
+</body>
+</html>

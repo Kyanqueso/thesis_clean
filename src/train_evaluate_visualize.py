@@ -29,6 +29,7 @@ from sklearn.svm import LinearSVC
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
+import joblib
 
 # --- Optional Imports ---
 # Attempt to import optional libraries and set flags indicating their availability.
@@ -157,7 +158,7 @@ def train_evaluate(X_train, y_train, X_test, y_test, classifier, name):
         'Train-Time(s)': train_time,
         'Inference-Time-Total(s)': inference_time_total,
         'Test-Samples': len(X_test)
-    }, classifier
+    }, classifier, y_prob
 
 # --- Visualization Functions ---
 def plot_dimensionality_reduction(X, y, emb_name, out_dir):
@@ -280,12 +281,18 @@ def main():
     parser.add_argument("--embed-dir", type=Path, default=DEFAULT_EMBED_DIR, help="Directory to read embeddings from.")
     parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR, help="Directory to write results to.")
     parser.add_argument("--figures-dir", type=Path, default=DEFAULT_FIGURES_DIR, help="Directory to write figures to.")
+    parser.add_argument("--save-models", action="store_true", help="Persist each trained classifier to --models-dir as a joblib file.")
+    parser.add_argument("--models-dir", type=Path, default=None, help="Directory for saved models (default: <results-dir>/../models).")
+    parser.add_argument("--skip-projections", action="store_true", help="Skip the PCA/t-SNE/UMAP plots (they dominate runtime).")
     args = parser.parse_args()
     EMBED_DIR = args.embed_dir
     RESULTS_DIR = args.results_dir
     FIGURES_DIR = args.figures_dir
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    MODELS_DIR = args.models_dir if args.models_dir else RESULTS_DIR.parent / "models"
+    if args.save_models:
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Load data
     df = load_data(args.data)
@@ -313,6 +320,8 @@ def main():
 
     all_results = []
     classifiers = get_classifiers()
+    prediction_store = {}
+    emb_dims = {}
 
     # Process each embedding file
     for emb_name, emb_path in available_embeddings.items():
@@ -320,15 +329,20 @@ def main():
         
         embeddings = np.load(emb_path)
         X_train, X_test = embeddings[train_idx], embeddings[test_idx]
-        
-        plot_dimensionality_reduction(embeddings, y, emb_name, FIGURES_DIR)
+        emb_dims[emb_name] = int(embeddings.shape[1])
+
+        if not args.skip_projections:
+            plot_dimensionality_reduction(embeddings, y, emb_name, FIGURES_DIR)
         
         trained_models = {}
         for clf_name, classifier in classifiers.items():
-            result, trained_model = train_evaluate(X_train, y_train, X_test, y_test, classifier, clf_name)
+            result, trained_model, y_prob = train_evaluate(X_train, y_train, X_test, y_test, classifier, clf_name)
             result['Embeddings'] = emb_name.upper()
             all_results.append(result)
             trained_models[clf_name] = trained_model
+            prediction_store[f"{emb_name}__{clf_name}"] = y_prob.astype(np.float32)
+            if args.save_models:
+                joblib.dump(trained_model, MODELS_DIR / f"{emb_name}_{clf_name}.joblib")
         
         plot_roc_pr_curves(X_test, y_test, trained_models, emb_name, FIGURES_DIR)
 
@@ -362,6 +376,30 @@ def main():
     print("\n💾 Saving results...")
     results_df.to_csv(RESULTS_DIR / 'full_evaluation_results.csv', index=False)
     print(f"   ✔️ Full results saved to: {RESULTS_DIR / 'full_evaluation_results.csv'}")
+
+    # Per-sample test-set probabilities (keys: "{embedding}__{classifier}") for
+    # interactive curves / threshold analysis in the dashboard (app/).
+    np.savez_compressed(RESULTS_DIR / 'predictions.npz',
+                        y_true=y_test.astype(np.int8), test_idx=test_idx, **prediction_store)
+    print(f"   ✔️ Per-sample predictions saved to: {RESULTS_DIR / 'predictions.npz'}")
+
+    run_meta = {
+        'data_file': str(args.data),
+        'n_samples': int(len(y)),
+        'n_malicious': int(y.sum()),
+        'n_benign': int(len(y) - y.sum()),
+        'n_train': int(len(train_idx)),
+        'n_test': int(len(test_idx)),
+        'test_size': args.test_size,
+        'seed': SEED,
+        'embedding_dims': emb_dims,
+        'classifiers': list(classifiers.keys()),
+        'models_saved': bool(args.save_models),
+        'finished_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+    }
+    with open(RESULTS_DIR / 'run_meta.json', 'w') as f:
+        json.dump(run_meta, f, indent=4)
+    print(f"   ✔️ Run metadata saved to: {RESULTS_DIR / 'run_meta.json'}")
 
     # --- HTML Report Export ---
     # Same results table as full_evaluation_results.csv, in HTML form, for visual
