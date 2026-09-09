@@ -10,6 +10,8 @@ import argparse
 import os
 import subprocess
 import sys
+import time
+from collections import deque
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -46,6 +48,88 @@ except Exception:
     OPENAI_ENABLED = False
     print("⚠️ Warning: OpenAI API key not found or invalid. OpenAI models will be skipped.")
 
+# --- OpenAI Rate Limiting ---
+# text-embedding-3-small is capped on TOKENS PER MINUTE, not requests. The cap is
+# a rolling 60-second window, so it frees up continuously — a 429 means "you are
+# a few thousand tokens over right now", not "you are locked out". Two defences:
+#
+#   1. _TokenBudget paces requests to stay under a fraction of the limit, so the
+#      429 does not happen in the first place;
+#   2. _embed_batch retries with backoff, honouring the retry-after header, so a
+#      429 that slips through costs a second instead of the whole run.
+#
+# Set OPENAI_TPM to your account's real limit (see platform.openai.com/account/rate-limits).
+OPENAI_TPM = int(os.environ.get("OPENAI_TPM", 1_000_000))
+OPENAI_TPM_TARGET = float(os.environ.get("OPENAI_TPM_TARGET", 0.85))  # headroom
+OPENAI_REQUEST_TOKENS = 100_000   # tokens per request; well under the 300k cap
+OPENAI_MAX_TOKENS = 8191          # per-input limit for the model
+
+
+class _TokenBudget:
+    """Rolling 60s token accountant. take(n) blocks until n tokens fit."""
+
+    def __init__(self, limit: int, target: float):
+        self.cap = max(1, int(limit * target))
+        self.events: deque = deque()   # (timestamp, tokens)
+        self.used = 0
+        self.waited = 0.0
+
+    def _expire(self, now: float):
+        while self.events and now - self.events[0][0] >= 60.0:
+            self.used -= self.events.popleft()[1]
+
+    def take(self, tokens: int):
+        while True:
+            now = time.monotonic()
+            self._expire(now)
+            # `not self.events` lets an oversized batch through: nothing to wait for
+            if self.used + tokens <= self.cap or not self.events:
+                self.events.append((now, tokens))
+                self.used += tokens
+                return
+            wait = 60.0 - (now - self.events[0][0]) + 0.05
+            self.waited += wait
+            time.sleep(max(wait, 0.05))
+
+
+def _retry_after(exc) -> float | None:
+    """Seconds OpenAI asked us to wait, if it said so."""
+    headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+    for key, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
+        raw = headers.get(key)
+        if raw:
+            try:
+                return float(raw) * scale + 0.1
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _token_batches(counts: list[int], budget: int, max_texts: int) -> list[tuple[int, int]]:
+    """Contiguous [start, end) spans respecting both a token budget and a text cap."""
+    spans, start, total = [], 0, 0
+    for i, n in enumerate(counts):
+        if i > start and (total + n > budget or i - start >= max_texts):
+            spans.append((start, i))
+            start, total = i, 0
+        total += n
+    spans.append((start, len(counts)))
+    return spans
+
+
+def _embed_batch(batch: list[str], model_id: str, attempts: int = 6):
+    """One embeddings call, retried with backoff. Raises only if every try fails."""
+    for k in range(attempts):
+        try:
+            return client.embeddings.create(model=model_id, input=batch)
+        except Exception as e:  # rate limits, timeouts, transient 5xx
+            if k == attempts - 1:
+                raise
+            wait = _retry_after(e) or min(2 ** k, 30)
+            print(f"\n  ⏳ {type(e).__name__} — retry {k + 1}/{attempts - 1} in {wait:.1f}s")
+            time.sleep(wait)
+
+
 # --- Embedding Functions ---
 def get_tokenizer(model_id: str) -> tiktoken.Encoding:
     """Get the tokenizer for a given OpenAI model, with a fallback."""
@@ -73,19 +157,37 @@ def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_
         if not OPENAI_ENABLED:
             raise RuntimeError("OpenAI API key is not configured. Cannot generate embeddings.")
         
-        MAX_TOKENS = 8191
         tokenizer = get_tokenizer(model_id)
 
-        def truncate(text: str) -> str:
-            """Truncate text to fit within OpenAI's token limit."""
-            tokens = tokenizer.encode(text)
-            return tokenizer.decode(tokens[:MAX_TOKENS]) if len(tokens) > MAX_TOKENS else text
+        # Tokenize once: we need the counts to pace against the TPM limit anyway,
+        # and truncating up front means no request can exceed the model's window.
+        prepared, counts, n_truncated = [], [], 0
+        for t in tqdm(texts, desc="Tokenizing", leave=False):
+            t = t if t and t.strip() else " "   # the API rejects empty strings
+            ids = tokenizer.encode(t)
+            if len(ids) > OPENAI_MAX_TOKENS:
+                ids = ids[:OPENAI_MAX_TOKENS]
+                t = tokenizer.decode(ids)
+                n_truncated += 1
+            prepared.append(t)
+            counts.append(len(ids))
+
+        spans = _token_batches(counts, OPENAI_REQUEST_TOKENS, batch_size)
+        total_tokens = sum(counts)
+        budget = _TokenBudget(OPENAI_TPM, OPENAI_TPM_TARGET)
+        floor_min = total_tokens / budget.cap
+        print(f"    {total_tokens:,} tokens in {len(spans):,} requests "
+              f"({n_truncated:,} truncated) · pacing at {budget.cap:,} tokens/min "
+              f"→ ~{floor_min:.1f} min minimum")
 
         all_embeddings = []
-        for i in tqdm(range(0, len(texts), batch_size), desc=f"OpenAI ({model_id})"):
-            batch = [truncate(t) if t else " " for t in texts[i:i + batch_size]]
-            response = client.embeddings.create(model=model_id, input=batch)
-            all_embeddings.extend([r.embedding for r in response.data])
+        for a, b in tqdm(spans, desc=f"OpenAI ({model_id})"):
+            budget.take(sum(counts[a:b]))          # wait if we would exceed the cap
+            response = _embed_batch(prepared[a:b], model_id)
+            all_embeddings.extend(r.embedding for r in response.data)
+
+        if budget.waited > 1:
+            print(f"    (paused {budget.waited:.0f}s total to stay under the rate limit)")
         return np.array(all_embeddings, dtype=np.float32)
 
     raise ValueError(f"Unsupported embedding type: {embed_type}")
@@ -94,7 +196,10 @@ def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_
 MODELS = {
     "openai": {
         "model_id": "text-embedding-3-small",
-        "batch_size": 500,
+        # texts per request; the real limiter is OPENAI_REQUEST_TOKENS, this is
+        # just a ceiling. Smaller than the old 500 so pacing is fine-grained and
+        # a retry re-sends less work.
+        "batch_size": 256,
         "embed_type": "openai",
         "enabled": OPENAI_ENABLED,
         "description": "OpenAI text-embedding-3-small (1536 dims)"
