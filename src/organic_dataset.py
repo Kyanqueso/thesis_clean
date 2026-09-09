@@ -18,6 +18,7 @@ FeTaQA, CoSQA, Enron Email, and CNN/DailyMail — and builds two datasets:
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -33,8 +34,10 @@ except ImportError:
 # --- Configuration ---
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
-DATA_DIR = ROOT_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from pipeline_paths import DATA_DIR, DATASETS  # noqa: E402
 
 PIPELINE2_N_PER_SOURCE = 7000
 
@@ -296,9 +299,17 @@ def main():
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--limit", type=int, default=None, help="Pull only this many rows per source (for smoke testing).")
-    parser.add_argument("--alamsabi-data", type=Path, default=DATA_DIR / "final_training_dataset.jsonl",
-                         help="Path to the existing Alamsabi dataset (for BIPIA malicious rows).")
+    parser.add_argument("--out-dir", type=Path, default=DATA_DIR,
+                         help="Directory to write the built datasets into.")
+    parser.add_argument("--alamsabi-data", type=Path, default=None,
+                         help="Path to the existing Alamsabi dataset (default: <out-dir>/%s)."
+                              % DATASETS["pipeline1_alamsabi"])
     args = parser.parse_args()
+
+    out_dir = args.out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.alamsabi_data is None:
+        args.alamsabi_data = out_dir / DATASETS["pipeline1_alamsabi"]
 
     if not args.alamsabi_data.is_file():
         print(f"❌ Error: Alamsabi dataset not found at: {args.alamsabi_data}")
@@ -331,11 +342,11 @@ def main():
     pipeline3_rows = build_pipeline3(pools, rng, attack_pool)
     n_injected = sum(1 for r in pipeline3_rows if r["label"] == 1)
     print(f"   - {len(pipeline3_rows):,} total rows ({n_injected:,} injected, {len(pipeline3_rows) - n_injected:,} clean)")
-    write_jsonl(pipeline3_rows, DATA_DIR / "organic_injected_dataset.jsonl")
+    write_jsonl(pipeline3_rows, out_dir / DATASETS["pipeline3_organic_injected"])
 
     print("\n🧩 Building pipeline 2 dataset (organic benign + Alamsabi BIPIA malicious)...")
     pipeline2_rows = build_pipeline2(pools, rng, args.alamsabi_data, pipeline2_n)
-    write_jsonl(pipeline2_rows, DATA_DIR / "organic_bipia_dataset.jsonl")
+    write_jsonl(pipeline2_rows, out_dir / DATASETS["pipeline2_organic_bipia"])
 
     print("\n🎉🎉🎉 Organic dataset construction completed! 🎉🎉🎉")
 

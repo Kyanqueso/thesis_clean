@@ -14,11 +14,18 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Data files is too large.
+# --- PROJECT SPECIFIC ---
+
+# Data files is large.
 data/
+data_from_vastai/
 
 # Generated embeddings also too large
 embeddings/
+
+# Per-pipeline / per-ablation-mode run outputs (very large)
+runs/
+runs_from_vastai/
 
 # API Keys and secrets
 .env
@@ -26,3 +33,6 @@ embeddings/
 
 personal.txt
 
+
+# Supervisor-delivered artifacts (runs/ is a junction into this)
+Thesis Artifacts/

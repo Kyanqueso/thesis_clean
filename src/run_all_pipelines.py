@@ -19,15 +19,13 @@ import pandas as pd
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
-DATA_DIR = ROOT_DIR / "data"
-RUNS_DIR = ROOT_DIR / "runs"
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-PIPELINES = {
-    "pipeline1_alamsabi": DATA_DIR / "final_training_dataset.jsonl",
-    "pipeline2_organic_bipia": DATA_DIR / "organic_bipia_dataset.jsonl",
-    "pipeline3_organic_injected": DATA_DIR / "organic_injected_dataset.jsonl",
-}
-MODES = ["normal", "user_intent_only", "context_only"]
+# machines name their trees differently (data/ + runs/ here, *_from_vastai/ on
+# the main machine); pipeline_paths resolves them, and the dashboard passes
+# --data-dir/--runs-dir explicitly when it launches this script
+from pipeline_paths import DATA_DIR, DATASETS as PIPELINES, MODES, RUNS_DIR  # noqa: E402
 
 
 def make_limited_copy(src: Path, limit: int, dest: Path) -> Path:
@@ -100,19 +98,32 @@ def main():
                          help="Comma-separated subset of embedding models to run (passed through to generate_embeddings.py).")
     parser.add_argument("--python", type=str, default=sys.executable,
                          help="Python interpreter to use for subprocess calls.")
+    parser.add_argument("--save-models", action="store_true",
+                         help="Persist trained classifiers per run (passed through to train_evaluate_visualize.py).")
+    parser.add_argument("--skip-projections", action="store_true",
+                         help="Skip PCA/t-SNE/UMAP plots (passed through to train_evaluate_visualize.py).")
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR,
+                         help="Directory holding the pipeline .jsonl datasets.")
+    parser.add_argument("--runs-dir", type=Path, default=RUNS_DIR,
+                         help="Directory the per-run outputs are written into.")
     args = parser.parse_args()
 
-    for pipeline_key, data_path in PIPELINES.items():
+    data_dir, runs_dir = args.data_dir, args.runs_dir
+    print(f"  datasets: {data_dir}")
+    print(f"  runs:     {runs_dir}")
+
+    for pipeline_key, data_name in PIPELINES.items():
+        data_path = data_dir / data_name
         if not data_path.is_file():
             print(f"⚠️ Skipping {pipeline_key}: dataset not found at {data_path}")
             continue
 
         run_data_path = data_path
         if args.limit:
-            run_data_path = make_limited_copy(data_path, args.limit, RUNS_DIR / "_smoke_data" / f"{pipeline_key}.jsonl")
+            run_data_path = make_limited_copy(data_path, args.limit, runs_dir / "_smoke_data" / f"{pipeline_key}.jsonl")
 
         for mode in MODES:
-            run_dir = RUNS_DIR / pipeline_key / mode
+            run_dir = runs_dir / pipeline_key / mode
             embed_dir = run_dir / "embeddings"
             results_dir = run_dir / "results"
             figures_dir = run_dir / "figures"
@@ -136,10 +147,14 @@ def main():
                 "--results-dir", str(results_dir),
                 "--figures-dir", str(figures_dir),
             ]
+            if args.save_models:
+                eval_cmd += ["--save-models", "--models-dir", str(run_dir / "models")]
+            if args.skip_projections:
+                eval_cmd.append("--skip-projections")
             run_step(eval_cmd, f"{pipeline_key} / {mode} — train_evaluate_visualize")
 
     print(f"\n{'='*70}\n>>> Aggregating results across all runs\n{'='*70}")
-    aggregate_results(RUNS_DIR)
+    aggregate_results(runs_dir)
 
     print("\n🎉🎉🎉 All pipelines completed! 🎉🎉🎉")
 
