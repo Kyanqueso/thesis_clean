@@ -27,12 +27,26 @@ Metrics reported per (embedding x classifier) configuration:
 
 import argparse
 import warnings
+import faulthandler
 import json
 import os
 import platform
-import threading
+import sys
 import time
 from pathlib import Path
+
+try:                      # Unix only; gives the kernel's peak-RSS high-water mark
+    import resource
+    _HAS_RESOURCE = True
+except ImportError:
+    _HAS_RESOURCE = False
+
+# A native crash (SIGSEGV/SIGBUS/SIGFPE) in numba, OpenMP or a BLAS otherwise
+# surfaces only as "exit -11" from the orchestrator, with no indication of which
+# line died. faulthandler dumps the Python stack of every thread to stderr first,
+# which is the difference between a guess and a diagnosis. stderr is unbuffered,
+# so the dump survives even when buffered stdout is lost.
+faulthandler.enable(all_threads=True)
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -253,20 +267,40 @@ class _GpuProbe:
 GPU = _GpuProbe()
 
 
+def _peak_rss_bytes() -> float:
+    """Process peak RSS as the OS already tracks it — no sampling required.
+
+    Linux/macOS: getrusage(RUSAGE_SELF).ru_maxrss, a kernel high-water mark
+    (KiB on Linux, bytes on macOS). Windows: psutil's peak_wset, the same idea.
+    """
+    if _HAS_RESOURCE:
+        ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return float(ru if sys.platform == "darwin" else ru * 1024)
+    if HAS_PSUTIL:
+        info = psutil.Process().memory_info()
+        return float(getattr(info, "peak_wset", info.rss))
+    return float("nan")
+
+
 class _ResourceMeter:
-    """Wall time, CPU-seconds, peak RSS growth and peak VRAM growth over a block.
+    """Wall time, CPU-seconds and peak-RSS growth over a block. No threads.
 
-    Peaks need sampling rather than a before/after read: a fit can allocate and
-    free inside the block, and only the high-water mark tells you what the
-    machine had to supply. A 20 ms daemon thread costs nothing next to a model
-    fit and catches anything that lives longer than a couple of frames.
+    An earlier version sampled RSS from a 20 ms daemon thread. That put an extra
+    live thread inside every classifier fit — including the ones that fork worker
+    processes (CalibratedClassifierCV(cv=5, n_jobs=-1) -> loky) — and forking a
+    multi-threaded process is the classic route to SIGSEGV. It killed the run
+    with exit -11, leaving the worker pool's semaphores behind ("leaked semlock
+    objects" at shutdown).
 
-    Every field is a DELTA against block entry, so a value is "what this fit
-    cost", not "what the interpreter happened to be holding".
+    The thread was never needed: the kernel maintains the high-water mark for
+    free. peak_rss_mb is now how much THIS block raised that mark, so 0.0 means
+    the block stayed under a peak an earlier block had already set — a true
+    statement, and a cheaper one.
+
+    VRAM is a plain before/after difference, only when --gpu-probe opted in.
     """
 
-    def __init__(self, interval: float = 0.02):
-        self._interval = interval
+    def __init__(self):
         self._proc = psutil.Process() if HAS_PSUTIL else None
         self.wall_seconds = 0.0
         self.cpu_seconds = float("nan")
@@ -274,37 +308,24 @@ class _ResourceMeter:
         self.peak_vram_mb = float("nan")
 
     def __enter__(self):
-        self._base_rss = self._peak_rss = self._proc.memory_info().rss if self._proc else 0
-        self._base_vram = self._peak_vram = GPU.used_bytes()
+        self._base_peak_rss = _peak_rss_bytes()
+        self._base_vram = GPU.used_bytes()
         if self._proc:
             ct = self._proc.cpu_times()
             self._cpu0 = ct.user + ct.system
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._sample, daemon=True)
-        self._thread.start()
         self._t0 = time.perf_counter()
         return self
 
-    def _sample(self):
-        while not self._stop.wait(self._interval):
-            try:
-                if self._proc:
-                    self._peak_rss = max(self._peak_rss, self._proc.memory_info().rss)
-                if GPU.ok:
-                    self._peak_vram = max(self._peak_vram, GPU.used_bytes())
-            except Exception:  # noqa: BLE001 - process teardown races
-                return
-
     def __exit__(self, *exc):
         self.wall_seconds = time.perf_counter() - self._t0
-        self._stop.set()
-        self._thread.join(timeout=1.0)
         if self._proc:
             ct = self._proc.cpu_times()
             self.cpu_seconds = (ct.user + ct.system) - self._cpu0
-            self.peak_rss_mb = max(0.0, (self._peak_rss - self._base_rss) / 1e6)
+        peak = _peak_rss_bytes()
+        if np.isfinite(peak) and np.isfinite(self._base_peak_rss):
+            self.peak_rss_mb = max(0.0, (peak - self._base_peak_rss) / 1e6)
         if GPU.ok:
-            self.peak_vram_mb = max(0.0, (self._peak_vram - self._base_vram) / 1e6)
+            self.peak_vram_mb = max(0.0, (GPU.used_bytes() - self._base_vram) / 1e6)
         return False
 
 

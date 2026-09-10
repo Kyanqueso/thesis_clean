@@ -40,11 +40,24 @@ def make_limited_copy(src: Path, limit: int, dest: Path) -> Path:
 
 
 def run_step(cmd: list[str], label: str):
-    print(f"\n{'='*70}\n>>> {label}\n{'='*70}")
-    print("   $", " ".join(str(c) for c in cmd))
+    # Children run with -u and these prints flush: a process killed by a native
+    # signal discards its buffered stdout, so without this the log stops well
+    # before the line that actually crashed and the exit code points nowhere.
+    print(f"\n{'='*70}\n>>> {label}\n{'='*70}", flush=True)
+    print("   $", " ".join(str(c) for c in cmd), flush=True)
     result = subprocess.run(cmd)
     if result.returncode != 0:
-        raise RuntimeError(f"Step failed (exit {result.returncode}): {label}")
+        # negative == killed by signal; name it, because "exit -11" alone reads
+        # like an ordinary failure when it is actually a native crash
+        detail = ""
+        if result.returncode < 0:
+            import signal
+            try:
+                sig = signal.Signals(-result.returncode)
+                detail = f" — killed by {sig.name} ({sig.value}); see the faulthandler dump above"
+            except ValueError:
+                detail = f" — killed by signal {-result.returncode}"
+        raise RuntimeError(f"Step failed (exit {result.returncode}){detail}: {label}")
 
 
 def aggregate_results(runs_dir: Path):
@@ -129,7 +142,7 @@ def main():
             figures_dir = run_dir / "figures"
 
             gen_cmd = [
-                args.python, str(SCRIPT_DIR / "generate_embeddings.py"),
+                args.python, "-u", str(SCRIPT_DIR / "generate_embeddings.py"),
                 "--data", str(run_data_path),
                 "--mode", mode,
                 "--embed-dir", str(embed_dir),
@@ -141,7 +154,7 @@ def main():
             run_step(gen_cmd, f"{pipeline_key} / {mode} — generate_embeddings")
 
             eval_cmd = [
-                args.python, str(SCRIPT_DIR / "train_evaluate_visualize.py"),
+                args.python, "-u", str(SCRIPT_DIR / "train_evaluate_visualize.py"),
                 "--data", str(run_data_path),
                 "--embed-dir", str(embed_dir),
                 "--results-dir", str(results_dir),
