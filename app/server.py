@@ -32,6 +32,15 @@ def get_results():
     return {"rows": runs.all_results()}
 
 
+@app.get("/api/master")
+def get_master(reference: str = Query(default="normal")):
+    """One row per pipeline x embedding x classifier: reference-mode metrics,
+    ablation degradation and McNemar significance in a single grid."""
+    if reference not in runs.MODES:
+        raise HTTPException(404, f"unknown mode: {reference}")
+    return runs.master_table(reference)
+
+
 @app.get("/api/curves")
 def get_curves(pipeline: str, mode: str):
     """ROC/PR curves for a run. A run without predictions.npz answers 200 with

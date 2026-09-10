@@ -196,3 +196,31 @@ table.plain th { cursor: default; }
 tr.file-missing td { color: var(--muted); opacity: 0.6; }
 .mono { font-family: var(--mono); font-size: 12px; }
 .preview-img { max-width: 100%; border-radius: 7px; border: 1px solid var(--border); background: #fff; }
+
+/* ---------------- master results grid ---------------- */
+/* One screenshot has to carry every pipeline, so this table trades padding for
+   density and leans on colour to make the degradation column readable at a glance. */
+table.master { font-size: 12.5px; }
+table.master th, table.master td { padding: 4px 8px; }
+table.master th { cursor: default; }
+table.master tr.grp th {
+  text-align: center; border-bottom: 1px solid var(--border);
+  color: var(--ink-2); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.05em; background: var(--card2);
+}
+table.master tr.grp th:empty { background: transparent; border-bottom: 0; }
+#master-card th { position: sticky; background: var(--card); z-index: 1; }
+#master-card tr.grp th { top: 0; }
+#master-card tr:not(.grp) th { top: 22px; }
+tr.pipe-sep td { border-top: 2px solid var(--accent); }
+td.wrapcell { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+
+/* Δ colour encodes the SIGN, not the size: an ablation that costs performance is
+   the healthy case; one that costs nothing is the finding. */
+td.deg-pos { color: var(--ok-text); }
+td.deg-quiet { color: var(--muted); }
+td.deg-neg { color: var(--bad); font-weight: 650; }
+td.sig-yes { color: var(--ok-text); }
+td.sig-no { color: var(--muted); }
+.ns { color: var(--muted); font-size: 10px; }
+p.note { font-size: 12px; margin: 6px 0 0; }

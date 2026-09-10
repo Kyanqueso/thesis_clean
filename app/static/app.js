@@ -255,10 +255,11 @@ async function loadResults() {
   try { RESULTS = (await fetchJSON("/api/results")).rows; } catch { RESULTS = []; }
   const empty = !RESULTS.length;
   $("#no-results-card").style.display = empty ? "" : "none";
-  for (const id of ["#headline-card", "#ablation-card", "#allrows-card", "#figures-card"])
+  for (const id of ["#master-card", "#headline-card", "#ablation-card", "#allrows-card", "#figures-card"])
     $(id).style.display = empty ? "none" : "";
   if (empty) return;
   renderPipeChips();
+  loadMaster();
   renderHeadline();
   renderAblation();
   fillResultFilters();
@@ -267,6 +268,140 @@ async function loadResults() {
 }
 
 function runKey(r) { return `${r.Pipeline}|${r.Mode}`; }
+
+/* ---------- master results: one grid across every pipeline ---------- */
+let MASTER = null;
+
+const MASTER_COST = [
+  ["Latency-P50(ms)", "p50 ms", 3], ["Latency-P99(ms)", "p99 ms", 3],
+  ["Train-Time(s)", "fit s", 1], ["Train-PeakRSS(MB)", "RSS MB", 0],
+  ["Train-PeakVRAM(MB)", "VRAM MB", 0],
+];
+
+// the shared fmt() renders a missing value as blank; in this grid a blank cell
+// reads as "zero", so absent metrics get an explicit em dash instead
+const mfmt = (x, d = 4) => (typeof x === "number" ? x.toFixed(d) : "—");
+
+async function loadMaster() {
+  const ref = $("#ms-reference").value || "normal";
+  try { MASTER = await fetchJSON(`/api/master?reference=${encodeURIComponent(ref)}`); }
+  catch { MASTER = null; }
+  if (!MASTER) return;
+  const sel = $("#ms-metric");
+  if (!sel.options.length) {
+    sel.innerHTML = MASTER.metrics.map((m) =>
+      `<option value="${esc(m)}"${m === "ROC-AUC" ? " selected" : ""}>${esc(m)}</option>`).join("");
+  }
+  renderMaster();
+}
+
+function masterRows() {
+  if (!MASTER) return [];
+  let rows = MASTER.rows;
+  if ($("#ms-collapse").value === "best") {
+    const best = {};
+    for (const r of rows) {
+      const k = `${r.Pipeline}|${r.Embeddings}`;
+      if (!best[k] || (r["ROC-AUC"] ?? -1) > (best[k]["ROC-AUC"] ?? -1)) best[k] = r;
+    }
+    rows = Object.values(best);
+  }
+  return rows;
+}
+
+// Δ is signed and the sign is the whole point: positive = the ablation cost
+// performance. What a NON-positive Δ means depends on which input was removed,
+// so only the intent-only column raises an alarm:
+//   intent-only  — the intent carries no label information by construction, so
+//                  "removing it cost nothing" is expected; "removing it HELPED,
+//                  or the model was already near-perfect without the document"
+//                  means the classes separate without the injection. Alarm.
+//   context-only — dropping the intent and losing nothing is an ordinary
+//                  finding (the signal lives in the document), not a defect.
+// Colouring both the same way cried wolf on every P1/P3 row.
+function degCell(value, sig, variant) {
+  if (value === null || value === undefined) return `<td class="num">—</td>`;
+  const pp = value * 100;
+  const alarm = variant === "user_intent_only";
+  const cls = pp > 0.5 ? "deg-pos" : (alarm ? "deg-neg" : "deg-quiet");
+  const mark = sig === false ? " ns" : "";
+  return `<td class="num ${cls}">${pp >= 0 ? "+" : ""}${pp.toFixed(2)}<span class="ns">${mark}</span></td>`;
+}
+
+function pCell(p, sig) {
+  if (p === null || p === undefined) return `<td class="num muted" title="needs predictions.npz from every mode">—</td>`;
+  const txt = p < 1e-4 ? p.toExponential(0).replace("e-", "e−") : p.toFixed(4);
+  return `<td class="num ${sig ? "sig-yes" : "sig-no"}">${txt}${sig ? " ✓" : ""}</td>`;
+}
+
+function renderMaster() {
+  if (!MASTER) return;
+  const metric = $("#ms-metric").value || "ROC-AUC";
+  const showCost = $("#ms-cost").checked;
+  const vars = MASTER.variants;
+  const rows = masterRows();
+
+  const q = ["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC", "PR-AUC"];
+  const qShort = { "Accuracy": "Acc", "Precision": "Prec", "Recall": "Rec",
+                   "F1-Score": "F1", "ROC-AUC": "ROC-AUC", "PR-AUC": "PR-AUC" };
+
+  // two-tier header: group band on top, columns beneath
+  let head = `<tr class="grp">
+    <th colspan="4">Configuration</th>
+    <th colspan="${q.length}">Detection — ${esc(MODE_SHORT[MASTER.reference])}</th>
+    <th colspan="2">Errors</th>
+    <th colspan="${vars.length}">Ablation Δ ${esc(metric)} (pp)</th>
+    <th colspan="${vars.length}">McNemar p (Holm)</th>
+    ${showCost ? `<th colspan="${MASTER_COST.length}">Cost</th>` : ""}
+    </tr>`;
+  head += `<tr><th>Pipeline</th><th>Emb</th><th>Classifier</th><th></th>
+    ${q.map((m) => `<th class="num">${qShort[m]}</th>`).join("")}
+    <th class="num">FPR</th><th class="num">FNR</th>
+    ${vars.map((v) => `<th class="num">→${MODE_SHORT[v]}</th>`).join("")}
+    ${vars.map((v) => `<th class="num">→${MODE_SHORT[v]}</th>`).join("")}
+    ${showCost ? MASTER_COST.map(([, l]) => `<th class="num">${l}</th>`).join("") : ""}
+    </tr>`;
+
+  let body = "", lastPipe = null;
+  for (const r of rows) {
+    const sep = lastPipe && lastPipe !== r.Pipeline ? " pipe-sep" : "";
+    lastPipe = r.Pipeline;
+    const flags = (r.Flags || []).map((f) =>
+      `<span class="chip ${f}" title="Ablating the user intent costs nothing — the classes are separable without the injection, so this is corpus discrimination rather than injection detection">${f}</span>`).join("");
+    body += `<tr class="${sep}">
+      <td class="wrapcell" title="${esc(pLabel(r.Pipeline))}">${esc(pShort(r.Pipeline))}</td>
+      <td>${esc(r.Embeddings)}</td><td>${esc(r.Classifier)}</td><td>${flags}</td>
+      ${q.map((m) => `<td class="num">${mfmt(r[m])}</td>`).join("")}
+      <td class="num">${mfmt(r.FPR)}</td><td class="num">${mfmt(r.FNR)}</td>
+      ${vars.map((v) => degCell(r[`Deg:${v}:${metric}`], r[`Sig:${v}:significant`], v)).join("")}
+      ${vars.map((v) => pCell(r[`Sig:${v}:p_holm`], r[`Sig:${v}:significant`])).join("")}
+      ${showCost ? MASTER_COST.map(([k, , p]) => `<td class="num">${mfmt(r[k], p)}</td>`).join("") : ""}
+      </tr>`;
+  }
+  $("#master-table").innerHTML = head + body;
+  $("#master-notes").innerHTML = (MASTER.notes || [])
+    .map((n) => `<p class="muted note">ⓘ ${esc(n)}</p>`).join("");
+  $("#ms-msg").textContent = `${rows.length} row${rows.length === 1 ? "" : "s"}`;
+}
+
+function masterCSV() {
+  const t = $("#master-table");
+  return Array.from(t.rows).map((tr) =>
+    Array.from(tr.cells).map((td) => {
+      const v = td.textContent.trim().replace(/\s+/g, " ");
+      return /[",]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+    }).join(",")).join("\n");
+}
+
+["#ms-metric", "#ms-collapse", "#ms-cost"].forEach((id) =>
+  $(id).addEventListener("change", renderMaster));
+$("#ms-reference").addEventListener("change", loadMaster);
+$("#ms-copy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(masterCSV());
+    $("#ms-msg").textContent = "copied to clipboard";
+  } catch { $("#ms-msg").textContent = "clipboard blocked — select the table and copy"; }
+});
 
 function renderHeadline() {
   const best = {};
@@ -282,7 +417,7 @@ function renderHeadline() {
         ? `<span class="chip shortcut" title="Near-perfect from the user intent alone — the classes are separable without any injection content (corpus-style shortcut)">shortcut</span>` : "";
       return `<tr class="${i === 0 ? "best" : ""}">
       <td class="wrapcell">${esc(pLabel(r.Pipeline))}</td><td>${MODE_SHORT[r.Mode]}${shortcut}</td>
-      <td>${esc(r.Embeddings)}</td><td>${esc(r.Classifier)}</td>
+      <td>${esc(r.Embeddings)}</td><td>${esc(r.Classifier)}</td><td>${flags}</td>
       <td class="num">${fmt(r.Accuracy)}</td><td class="num">${fmt(r["F1-Score"])}</td>
       <td class="num">${fmt(r["ROC-AUC"])}${microbar(r["ROC-AUC"])}</td><td class="num">${fmt(r["PR-AUC"])}</td>
       <td class="num">${fmt(r["Inference-Time-per-Sample(ms)"], 4)}</td>

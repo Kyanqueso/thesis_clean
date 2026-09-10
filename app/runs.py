@@ -104,6 +104,24 @@ def scan_state() -> dict:
     }
 
 
+def _finite(value):
+    """NaN/inf -> None. Starlette's JSONResponse serialises with allow_nan=False,
+    so a single NaN raises instead of rendering — and NaN is routine here: runs
+    written before the metrics expansion have fewer columns, so concatenating
+    them with newer runs fills the gaps."""
+    if isinstance(value, (float, np.floating)):
+        return float(value) if np.isfinite(value) else None
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    return value
+
+
+def _json_rows(df: pd.DataFrame) -> list[dict]:
+    return [{k: _finite(v) for k, v in rec.items()} for rec in df.to_dict("records")]
+
+
 def all_results() -> list[dict]:
     """Every run's full_evaluation_results.csv, tagged with Pipeline/Mode."""
     frames = []
@@ -121,7 +139,121 @@ def all_results() -> list[dict]:
             frames.append(df)
     if not frames:
         return []
-    return pd.concat(frames, ignore_index=True).to_dict("records")
+    return _json_rows(pd.concat(frames, ignore_index=True))
+
+
+# ---------------- master table ----------------
+# One row per (pipeline, embedding, classifier): the reference mode's metrics,
+# what the ablations cost, and whether that cost is significant. Everything a
+# results screenshot needs, across all pipelines, in one grid.
+
+MASTER_QUALITY = ["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC", "PR-AUC"]
+MASTER_EXTRA = ["FPR", "FNR", "TN", "FP", "FN", "TP", "Test-Samples",
+                "Latency-P50(ms)", "Latency-P99(ms)", "Train-Time(s)",
+                "Train-PeakRSS(MB)", "Train-PeakVRAM(MB)",
+                "Inference-Time-per-Sample(ms)"]
+
+
+def _ablation_significance(pipeline: str) -> dict:
+    """(EMB, Clf, mode_a, mode_b) -> McNemar result, from the cross-ablation CSV.
+
+    Written by src/train_evaluate_visualize.py into <runs>/{pipeline}/. Stored
+    under both orderings: McNemar is symmetric, only the sign of the accuracy
+    difference flips, and the table asks for whichever direction it renders.
+    """
+    path = RUNS_DIR / pipeline / "ablation_mcnemar.csv"
+    if not path.is_file():
+        return {}
+    try:
+        df = pd.read_csv(path)
+    except (pd.errors.ParserError, OSError, ValueError):
+        return {}
+    out = {}
+    for r in _json_rows(df):
+        emb = str(r.get("Embeddings", "")).upper()
+        clf, a, b = str(r.get("Classifier", "")), r.get("Mode-A"), r.get("Mode-B")
+        val = {"p_value": r.get("p_value"), "p_holm": r.get("p_holm"),
+               "significant": bool(r.get("significant")),
+               "b": r.get("b"), "c": r.get("c"), "method": r.get("method")}
+        out[(emb, clf, a, b)] = val
+        out[(emb, clf, b, a)] = val
+    return out
+
+
+def master_table(reference: str = "normal") -> dict:
+    """Flat rows joining reference-mode metrics + ablation degradation + McNemar.
+
+    Degradation is computed here from the per-run CSVs rather than read from
+    ablation_degradation.csv, so the table still works on runs produced before
+    the metrics expansion — those carry Accuracy/ROC-AUC/PR-AUC for all three
+    modes, which is enough. McNemar cannot be reconstructed that way (it needs
+    per-sample predictions), so it stays empty until the runs are redone.
+    """
+    if reference not in MODES:
+        reference = "normal"
+    records = all_results()
+    variants = [m for m in MODES if m != reference]
+    if not records:
+        return {"rows": [], "reference": reference, "variants": variants,
+                "metrics": MASTER_QUALITY, "notes": ["No results on disk yet."]}
+
+    by = {(r["Pipeline"], r["Embeddings"], r["Classifier"], r["Mode"]): r for r in records}
+    sig = {p: _ablation_significance(p) for p in PIPELINES}
+
+    configs = sorted({(r["Pipeline"], r["Embeddings"], r["Classifier"]) for r in records},
+                     key=lambda c: (list(PIPELINES).index(c[0]) if c[0] in PIPELINES else 99,
+                                    c[1], c[2]))
+    rows, missing_ref = [], 0
+    for pipeline, emb, clf in configs:
+        ref = by.get((pipeline, emb, clf, reference))
+        if ref is None:
+            missing_ref += 1
+            continue
+        row = {"Pipeline": pipeline, "Embeddings": emb, "Classifier": clf}
+        for key in MASTER_QUALITY + MASTER_EXTRA:
+            row[key] = _finite(ref.get(key))
+
+        flags = []
+        for mode in variants:
+            var = by.get((pipeline, emb, clf, mode))
+            for metric in MASTER_QUALITY:
+                ref_v, var_v = (ref.get(metric), var.get(metric)) if var else (None, None)
+                row[f"Deg:{mode}:{metric}"] = (
+                    None if ref_v is None or var_v is None else float(ref_v) - float(var_v))
+                row[f"Var:{mode}:{metric}"] = _finite(var_v) if var else None
+            hit = sig.get(pipeline, {}).get((emb.upper(), clf, reference, mode))
+            row[f"Sig:{mode}:p_holm"] = hit["p_holm"] if hit else None
+            row[f"Sig:{mode}:significant"] = hit["significant"] if hit else None
+            row[f"Sig:{mode}:b"] = hit["b"] if hit else None
+            row[f"Sig:{mode}:c"] = hit["c"] if hit else None
+
+        # Intent-only is the leakage canary: under a same-document design the
+        # intent carries no label information, so it must sit at chance. If the
+        # ablation costs nothing (or pays), the classes are separable without the
+        # injection and the headline number is not injection detection.
+        intent_auc = row.get("Var:user_intent_only:ROC-AUC")
+        intent_deg = row.get("Deg:user_intent_only:ROC-AUC")
+        if intent_auc is not None and intent_auc >= 0.99:
+            flags.append("shortcut")
+        elif intent_deg is not None and intent_deg <= 0:
+            flags.append("shortcut")
+        row["Flags"] = flags
+        rows.append(row)
+
+    notes = []
+    if not any(sig.values()):
+        notes.append("McNemar columns are empty: no <runs>/<pipeline>/ablation_mcnemar.csv. "
+                     "It needs per-sample predictions.npz from every mode — re-run the "
+                     "pipelines with the current src/train_evaluate_visualize.py.")
+    if rows and rows[0].get("Precision") is None:
+        notes.append("Precision/Recall/confusion/latency columns are empty: these runs predate "
+                     "the metrics expansion. Degradation still works (it only needs "
+                     "Accuracy/ROC-AUC/PR-AUC, which the old schema has).")
+    if missing_ref:
+        notes.append(f"{missing_ref} configuration(s) have no '{reference}' run to anchor on "
+                     f"and are omitted; switch the reference mode to see them.")
+    return {"rows": rows, "reference": reference, "variants": variants,
+            "metrics": MASTER_QUALITY, "notes": notes}
 
 
 def _downsample(x: np.ndarray, y: np.ndarray, n: int = 250) -> tuple[list, list]:

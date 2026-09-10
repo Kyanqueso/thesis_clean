@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>thesis_clean dashboard</title>
-<link rel="stylesheet" href="/static/style.css?v=9">
+<link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body>
 <header>
@@ -85,6 +85,33 @@
     <p class="muted">No <code>runs/*/*/results/full_evaluation_results.csv</code> found.
     Launch a run from the Runs tab (a smoke run with limit≈500 + minilm finishes in minutes),
     or drop your supervisor's <code>runs/</code> folder into the repo root.</p>
+  </div>
+
+  <div class="card" id="master-card">
+    <h2>Master results <span class="muted">— every pipeline in one grid: detection quality,
+      what each ablation costs, and whether that cost is significant</span></h2>
+    <div class="row wrap gap">
+      <label class="field"><span>Reference mode</span><select id="ms-reference">
+        <option value="normal">normal</option>
+        <option value="context_only">context_only</option>
+        <option value="user_intent_only">user_intent_only</option>
+      </select></label>
+      <label class="field"><span>Δ metric</span><select id="ms-metric"></select></label>
+      <label class="field"><span>Rows</span><select id="ms-collapse">
+        <option value="all">every classifier</option>
+        <option value="best">best classifier per pipeline × embedding</option>
+      </select></label>
+      <label class="chip-toggle"><input type="checkbox" id="ms-cost"><span>cost columns</span></label>
+      <button class="btn small" id="ms-copy">Copy as CSV</button>
+      <span class="msg" id="ms-msg"></span>
+    </div>
+    <div class="scroll"><table id="master-table" class="master"></table></div>
+    <div id="master-notes"></div>
+    <p class="muted">Δ is <b>absolute performance degradation</b> in percentage points:
+      reference − ablated, so positive means the ablation <b>hurt</b>. A non-positive Δ on
+      intent-only means the classes separate without the injection — a corpus shortcut, not
+      detection. <b>p</b> is a paired McNemar test (Holm-corrected) between the reference run
+      and the ablated run on the same frozen test rows.</p>
   </div>
 
   <div class="card" id="headline-card">
@@ -174,6 +201,6 @@
 </section>
 </main>
 
-<script src="/static/app.js?v=7"></script>
+<script src="/static/app.js?v=8"></script>
 </body>
 </html>
