@@ -136,19 +136,38 @@ class _GpuProbe:
         correctly reads as 0 MB. That is the expected result here: every
         classifier in this script is CPU-only, so the pipeline's real VRAM cost
         lives in generate_embeddings.py (Qwen3-4B), not in this stage.
+
+    OFF BY DEFAULT, and initialised lazily — never at import. NVML is not
+    fork-safe, and sklearn forks: CalibratedClassifierCV(n_jobs=-1) starts loky
+    workers during fit while _ResourceMeter's sampler thread is calling NVML
+    every 20 ms. A fork racing an in-flight NVML call leaves the child holding
+    inconsistent driver state, and the process dies with SIGSEGV (exit -11),
+    taking the worker pool with it ("leaked semlock objects" at shutdown). That
+    is a real crash observed on Linux; Windows never showed it because it spawns
+    rather than forks.
+
+    Since every classifier here is CPU-only the reading is always 0.0 MB, so
+    defaulting this on traded a guaranteed-useless number for a crash risk.
+    Opt in with --gpu-probe (or THESIS_GPU_PROBE=1) when a classifier actually
+    runs on the GPU, e.g. XGBoost with device="cuda".
     """
 
     def __init__(self):
         self.ok = False
         self.mode = "unavailable"
-        self.reason = ""
+        self.reason = "not probed (opt in with --gpu-probe)"
         self.name = None
         self.total_mb = 0.0
         self.attribution_failures = 0
         self._last_good = 0
         self._handles = []
         self._pid = os.getpid()
+        self._init_pid = None
 
+    def enable(self) -> None:
+        """Initialise NVML. Call once, from the main thread, before any fit."""
+        if self.ok:
+            return
         if not HAS_PYNVML:
             self.reason = "pynvml is not installed (pip install nvidia-ml-py)"
             return
@@ -167,7 +186,9 @@ class _GpuProbe:
             self.reason = f"{type(e).__name__}: {e}"
             return
 
+        self._pid = self._init_pid = os.getpid()
         self.mode = "device_total" if self._process_bytes() is None else "per_process"
+        self.reason = ""
         self.ok = True
 
     def _process_bytes(self) -> int | None:
@@ -203,6 +224,14 @@ class _GpuProbe:
         delta then contributes nothing) and is counted instead.
         """
         if not self.ok:
+            return 0
+        # Fork guard: NVML handles do not survive fork. If a forked child ever
+        # reaches this (a worker importing the module, a future multiprocessing
+        # change), it must not touch the inherited driver state.
+        if os.getpid() != self._init_pid:
+            self.ok = False
+            self.mode = "unavailable"
+            self.reason = "NVML handles inherited across a fork; disabled in child"
             return 0
         if self.mode == "per_process":
             b = self._process_bytes()
@@ -889,7 +918,15 @@ def main():
                         help="Comma-separated ablation modes to compare across.")
     parser.add_argument("--skip-ablation-compare", action="store_true",
                         help="Skip the cross-ablation McNemar and degradation tables.")
+    parser.add_argument("--gpu-probe", action="store_true",
+                        default=os.environ.get("THESIS_GPU_PROBE", "") not in ("", "0"),
+                        help="Measure GPU VRAM via NVML. OFF by default: these classifiers are "
+                             "CPU-only so the reading is always 0, and NVML is not fork-safe — "
+                             "sampling it while sklearn forks loky workers segfaults on Linux. "
+                             "Enable only if a classifier actually runs on the GPU.")
     args = parser.parse_args()
+    if args.gpu_probe:
+        GPU.enable()   # main thread, before any fit forks a worker pool
     EMBED_DIR = args.embed_dir
     RESULTS_DIR = args.results_dir
     FIGURES_DIR = args.figures_dir
@@ -921,7 +958,7 @@ def main():
         return
 
     print(f"\n🖥️  Environment: {'psutil ok' if HAS_PSUTIL else 'psutil MISSING (CPU/RAM columns will be NaN)'}"
-          f" · {('GPU ' + str(GPU.name) + f' [{GPU.mode}]') if GPU.ok else 'GPU unavailable: ' + GPU.reason}")
+          f" · {('GPU ' + str(GPU.name) + f' [{GPU.mode}]') if GPU.ok else 'GPU VRAM ' + GPU.reason}")
 
     all_results = []
     classifiers = get_classifiers()
