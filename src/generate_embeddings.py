@@ -24,9 +24,14 @@ try:
     from openai import OpenAI
     from dotenv import load_dotenv
     import tiktoken
-except ImportError:
-    print("❌ Error: Required libraries are not installed.")
-    print("   Please run: pip install sentence-transformers openai python-dotenv tiktoken")
+except ImportError as e:
+    # Name the offender. "Required libraries are not installed" on a fresh venv
+    # sends you re-running the whole pip install to find which one of five it is.
+    _PIP_NAME = {"sentence_transformers": "sentence-transformers", "dotenv": "python-dotenv"}
+    _missing = getattr(e, "name", None) or "one of the required libraries"
+    print(f"❌ Error: '{_missing}' is not installed ({e}).")
+    print(f"   Install it with:  pip install {_PIP_NAME.get(_missing, _missing)}")
+    print("   Or reinstall all of them:  pip install -r requirements.txt")
     exit(1)
 
 load_dotenv()
@@ -269,12 +274,17 @@ def main():
     EMBED_DIR = args.embed_dir
     EMBED_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Which backends the CALLER asked for. Distinct from MODELS[k]["enabled"],
+    # which also goes False when a backend self-disables (e.g. no OpenAI key) —
+    # that is precisely the case we must report rather than quietly skip.
+    requested = sorted(MODELS.keys())
     if args.models:
         selected = {m.strip() for m in args.models.split(",")}
         unknown = selected - set(MODELS.keys())
         if unknown:
             print(f"❌ Error: Unknown model(s) in --models: {', '.join(unknown)}. Available: {', '.join(MODELS.keys())}")
-            return
+            return 1
+        requested = sorted(selected)
         for key in MODELS:
             if key not in selected:
                 MODELS[key]["enabled"] = False
@@ -312,29 +322,45 @@ def main():
             if result.returncode != 0:
                 print(f"  ❌ Subprocess for '{key}' exited with code {result.returncode}.")
 
-        print("\n\n🎉🎉🎉 Embedding generation completed! 🎉🎉🎉")
         print("\n📁 Summary of embedding files:")
-        for key, config in MODELS.items():
-            if config["enabled"]:
-                output_path = EMBED_DIR / f"{key}_prompt.npy"
-                if output_path.exists():
-                    size_mb = output_path.stat().st_size / 1e6
-                    print(f"   ✔️  {output_path.name:<25} ({size_mb:.2f} MB)")
-                else:
-                    print(f"   ❌ {output_path.name:<25} (generation failed or skipped)")
-        return
+        produced, absent = [], []
+        for key in requested:
+            output_path = EMBED_DIR / f"{key}_prompt.npy"
+            if output_path.exists():
+                size_mb = output_path.stat().st_size / 1e6
+                print(f"   ✔️  {output_path.name:<25} ({size_mb:.2f} MB)")
+                produced.append(key)
+            else:
+                why = "" if MODELS[key]["enabled"] else "  <- model disabled (missing API key?)"
+                print(f"   ❌ {output_path.name:<25} (not generated){why}")
+                absent.append(key)
+
+        # Exit non-zero when a REQUESTED backend produced nothing. Skipping
+        # openai because OPENAI_API_KEY was never exported used to print a
+        # warning and exit 0, so the orchestrator recorded the step as a success
+        # and moved on — the missing runs only surfaced much later, in the
+        # results table. Failing here puts it in the sweep's failure summary.
+        if absent:
+            print(f"\n❌ No embeddings produced for: {', '.join(absent)}")
+            print("   If a key is missing: export OPENAI_API_KEY / HF_TOKEN and re-run.")
+            print("   If you did not want these backends, pass --models "
+                  f"{','.join(produced) or '<backends you want>'}.")
+            return 1
+
+        print("\n\n🎉🎉🎉 Embedding generation completed! 🎉🎉🎉")
+        return 0
 
     # --- Data Loading and Validation ---
     if not args.data.is_file():
         print(f"❌ Error: Data file not found at: {args.data}")
-        return
+        return 1
 
     print(f"🔄 Loading data from: {args.data.name}...")
     try:
         df = pd.read_json(args.data, lines=True)
     except ValueError as e:
         print(f"❌ Error reading JSONL file: {e}")
-        return
+        return 1
 
     print("📊 Dataset Statistics:")
     print(f"   - Total samples: {len(df):,}")
@@ -415,6 +441,8 @@ def main():
                 print(f"   ✔️  {output_path.name:<25} ({size_mb:.2f} MB)")
             else:
                 print(f"   ❌ {output_path.name:<25} (generation failed or skipped)")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

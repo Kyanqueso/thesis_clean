@@ -39,7 +39,30 @@ def make_limited_copy(src: Path, limit: int, dest: Path) -> Path:
     return dest
 
 
-def run_step(cmd: list[str], label: str):
+def describe_exit(code: int) -> str:
+    """Human-readable exit status. A negative code means killed by a signal, and
+    saying so matters: 'exit -11' reads like an ordinary failure when it is
+    actually a native crash (SIGSEGV) inside a C extension."""
+    if code >= 0:
+        return f"exit {code}"
+    import signal
+    try:
+        sig = signal.Signals(-code)
+        return (f"exit {code} — killed by {sig.name} ({sig.value}); "
+                f"look for the faulthandler dump above")
+    except ValueError:
+        return f"exit {code} — killed by signal {-code}"
+
+
+def run_step(cmd: list[str], label: str) -> bool:
+    """Run one stage. Returns True on success; never raises on a child failure.
+
+    A failed step is reported and skipped rather than aborting the sweep. One
+    run crashing used to discard every run after it — a SIGSEGV in pipeline2
+    threw away pipeline2's remaining modes and all of pipeline3, including work
+    that had nothing to do with the fault. Failures are collected and summarised
+    at the end, and the process still exits non-zero, so nothing is hidden.
+    """
     # Children run with -u and these prints flush: a process killed by a native
     # signal discards its buffered stdout, so without this the log stops well
     # before the line that actually crashed and the exit code points nowhere.
@@ -47,17 +70,11 @@ def run_step(cmd: list[str], label: str):
     print("   $", " ".join(str(c) for c in cmd), flush=True)
     result = subprocess.run(cmd)
     if result.returncode != 0:
-        # negative == killed by signal; name it, because "exit -11" alone reads
-        # like an ordinary failure when it is actually a native crash
-        detail = ""
-        if result.returncode < 0:
-            import signal
-            try:
-                sig = signal.Signals(-result.returncode)
-                detail = f" — killed by {sig.name} ({sig.value}); see the faulthandler dump above"
-            except ValueError:
-                detail = f" — killed by signal {-result.returncode}"
-        raise RuntimeError(f"Step failed (exit {result.returncode}){detail}: {label}")
+        print(f"\n  ❌ FAILED ({describe_exit(result.returncode)}): {label}", flush=True)
+        print("     continuing with the remaining runs; use --fail-fast to stop here instead.",
+              flush=True)
+        return False
+    return True
 
 
 def aggregate_results(runs_dir: Path):
@@ -113,6 +130,8 @@ def main():
                          help="Python interpreter to use for subprocess calls.")
     parser.add_argument("--save-models", action="store_true",
                          help="Persist trained classifiers per run (passed through to train_evaluate_visualize.py).")
+    parser.add_argument("--fail-fast", action="store_true",
+                         help="Stop at the first failing step instead of continuing with the rest.")
     parser.add_argument("--skip-projections", action="store_true",
                          help="Skip PCA/t-SNE/UMAP plots (passed through to train_evaluate_visualize.py).")
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR,
@@ -125,6 +144,7 @@ def main():
     print(f"  datasets: {data_dir}")
     print(f"  runs:     {runs_dir}")
 
+    failures: list[str] = []
     for pipeline_key, data_name in PIPELINES.items():
         data_path = data_dir / data_name
         if not data_path.is_file():
@@ -151,7 +171,11 @@ def main():
                 gen_cmd.append("--force")
             if args.models:
                 gen_cmd += ["--models", args.models]
-            run_step(gen_cmd, f"{pipeline_key} / {mode} — generate_embeddings")
+            if not run_step(gen_cmd, f"{pipeline_key} / {mode} — generate_embeddings"):
+                failures.append(f"{pipeline_key}/{mode} — generate_embeddings")
+                if args.fail_fast:
+                    raise RuntimeError(f"generate_embeddings failed for {pipeline_key}/{mode}")
+                continue   # no embeddings -> nothing to train on
 
             eval_cmd = [
                 args.python, "-u", str(SCRIPT_DIR / "train_evaluate_visualize.py"),
@@ -164,13 +188,25 @@ def main():
                 eval_cmd += ["--save-models", "--models-dir", str(run_dir / "models")]
             if args.skip_projections:
                 eval_cmd.append("--skip-projections")
-            run_step(eval_cmd, f"{pipeline_key} / {mode} — train_evaluate_visualize")
+            if not run_step(eval_cmd, f"{pipeline_key} / {mode} — train_evaluate_visualize"):
+                failures.append(f"{pipeline_key}/{mode} — train_evaluate_visualize")
+                if args.fail_fast:
+                    raise RuntimeError(f"train_evaluate_visualize failed for {pipeline_key}/{mode}")
 
     print(f"\n{'='*70}\n>>> Aggregating results across all runs\n{'='*70}")
     aggregate_results(runs_dir)
 
+    if failures:
+        print(f"\n{'='*70}\n⚠️  {len(failures)} step(s) FAILED — everything else completed:")
+        for f in failures:
+            print(f"     · {f}")
+        print("   Re-run to retry only these: finished embeddings are cached, so the\n"
+              "   successful runs are skipped cheaply.\n" + "=" * 70)
+        return 1
+
     print("\n🎉🎉🎉 All pipelines completed! 🎉🎉🎉")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
