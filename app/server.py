@@ -68,7 +68,7 @@ def get_sample(pipeline: str, n: int = Query(default=1, ge=1, le=25)):
     rows = runs.sample_rows(pipeline, n=n)
     if not rows:
         raise HTTPException(404, f"{runs.PIPELINES[pipeline]['data']} is not in "
-                                 f"{paths.DATA_PREFIX}/ — download or build it from the Runs tab")
+                                 f"{paths.DATA_PREFIX}/ — download or build it from the Run tab")
     return {"rows": rows}
 
 

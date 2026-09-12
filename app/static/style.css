@@ -175,13 +175,48 @@ table.plain th { cursor: default; }
 .figures figcaption { font-size: 11px; color: var(--muted); font-family: var(--mono); margin-top: 3px; }
 
 /* ---------------- detect ---------------- */
-.verdict-row { display: flex; align-items: center; gap: 16px; margin: 14px 0 6px; }
-.verdict { font-weight: 700; font-size: 14px; padding: 8px 18px; border-radius: 8px; border: 1px solid; }
-.verdict.malicious { color: var(--bad); border-color: var(--bad); background: rgba(230, 103, 103, 0.14); }
-.verdict.benign { color: var(--ok-text); border-color: var(--ok); background: rgba(53, 192, 53, 0.13); }
-.gauge { flex: 1; height: 12px; background: var(--grid); border-radius: 999px; overflow: hidden; border: 1px solid var(--border); }
-#gauge-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--ok), var(--warn), var(--bad)); transition: width .3s; }
-.gauge-label { font-size: 15px; font-variant-numeric: tabular-nums; min-width: 70px; text-align: right; }
+/* One centred column: two inputs, one button. The button IS the verdict —
+   no separate badge, gauge or result panel to keep in sync. */
+/* This page is read across a room during a defence, so it runs a size up from
+   the dense table tabs rather than inheriting their 12-13px. */
+.detect-col { max-width: 820px; margin: 0 auto; padding-top: 8px; }
+.detect-title { text-align: center; font-size: 16px; margin-bottom: 24px; }
+.d-input, .d-box {
+  width: 100%; background: var(--card); border: 1px solid var(--border);
+  border-radius: 12px; margin-bottom: 16px;
+}
+.d-input { font: inherit; font-size: 16px; color: var(--text); padding: 16px 18px; }
+.d-input:focus { outline: none; border-color: var(--accent); }
+.d-box { position: relative; padding: 16px 18px 56px; }
+.d-box:focus-within { border-color: var(--accent); }
+.d-box textarea {
+  width: 100%; padding: 0; border: none; background: none; resize: vertical;
+  color: var(--text); font: 14px/1.6 var(--mono);
+}
+.d-box textarea:focus { outline: none; }
+/* docked in the box's bottom gutter — the padding above reserves the room */
+.d-tools { position: absolute; right: 14px; bottom: 12px; display: flex; gap: 8px; }
+.d-select {
+  font: inherit; font-size: 13px; color: var(--ink-2); background: var(--card2);
+  border: 1px solid var(--border); border-radius: 999px; padding: 5px 12px;
+}
+.d-select:hover, .d-select:focus { outline: none; border-color: var(--accent); }
+.d-tools .btn.small { font-size: 13px; padding: 5px 12px; border-radius: 999px; }
+
+.detect-btn {
+  width: 100%; font: inherit; font-weight: 700; font-size: 19px; cursor: pointer;
+  padding: 18px; border-radius: 999px; letter-spacing: 0.03em;
+  border: 1px solid var(--accent); background: var(--accent); color: #fff;
+}
+.detect-btn:disabled { cursor: not-allowed; }
+.detect-btn.loading { background: var(--card2); border-color: var(--border); color: var(--ink-2); }
+.detect-btn.malicious { background: var(--bad); border-color: var(--bad); }
+.detect-btn.benign { background: var(--ok); border-color: var(--ok); }
+.d-note { font-size: 13.5px; text-align: center; margin-top: 12px; }
+#detect-help { margin-top: 30px; padding: 18px 20px; }
+#detect-help ul { margin: 0; padding-left: 20px; color: var(--ink-2); font-size: 13.5px; line-height: 1.6; }
+#detect-help li { margin-bottom: 8px; }
+#detect-help code { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
 
 /* ---------------- files tab ---------------- */
 .file-section { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--card); }

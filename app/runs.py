@@ -270,7 +270,7 @@ def _unavailable(what: str, pipeline: str, mode: str | None = None) -> dict:
         "available": False,
         "missing": what,
         "reason": f"no {what} in {where} — delivered runs ship results and figures only",
-        "fix": ("re-run that pipeline/mode from the Runs tab (save models is on by "
+        "fix": ("re-run that pipeline/mode from the Run tab (save models is on by "
                 "default) to produce per-sample probabilities and saved classifiers"),
     }
 
@@ -446,7 +446,7 @@ def breakdown_fields(pipeline: str) -> dict:
         name = PIPELINES[pipeline]["data"]
         return {"available": False, "missing": name,
                 "reason": f"{name} is not in {paths.DATA_PREFIX}/ — the breakdown reads that dataset's metadata columns",
-                "fix": "download or build it from the Runs tab, then retry"}
+                "fix": "download or build it from the Run tab, then retry"}
     return {"available": True, "fields": [c for c in BREAKDOWN_FIELDS if c in df.columns]}
 
 

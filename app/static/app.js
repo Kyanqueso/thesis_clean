@@ -134,7 +134,7 @@ function renderMatrix() {
 function fillPipelineSelects() {
   const opts = Object.keys(STATE.pipelines)
     .map((p) => `<option value="${p}">${esc(pLabel(p))}</option>`).join("");
-  for (const id of ["#f-pipeline", "#d-sample-pipeline"]) {
+  for (const id of ["#f-pipeline"]) {
     const el = $(id);
     if (el && !el.dataset.filled) { el.innerHTML = opts; el.dataset.filled = "1"; }
   }
@@ -417,7 +417,7 @@ function renderHeadline() {
         ? `<span class="chip shortcut" title="Near-perfect from the user intent alone — the classes are separable without any injection content (corpus-style shortcut)">shortcut</span>` : "";
       return `<tr class="${i === 0 ? "best" : ""}">
       <td class="wrapcell">${esc(pLabel(r.Pipeline))}</td><td>${MODE_SHORT[r.Mode]}${shortcut}</td>
-      <td>${esc(r.Embeddings)}</td><td>${esc(r.Classifier)}</td><td>${flags}</td>
+      <td>${esc(r.Embeddings)}</td><td>${esc(r.Classifier)}</td>
       <td class="num">${fmt(r.Accuracy)}</td><td class="num">${fmt(r["F1-Score"])}</td>
       <td class="num">${fmt(r["ROC-AUC"])}${microbar(r["ROC-AUC"])}</td><td class="num">${fmt(r["PR-AUC"])}</td>
       <td class="num">${fmt(r["Inference-Time-per-Sample(ms)"], 4)}</td>
@@ -540,72 +540,99 @@ function renderFigures() {
 }
 
 /* ================= detect tab ================= */
+/* A saved model is keyed by pipeline × mode × emb × clf, but this tab exposes
+   only two dropdowns. Pipeline/mode are pinned to the headline run — falling
+   back to whatever this tree actually has, so a P1-only tree still works — and
+   the line under the button names the run that answered. */
+const DETECT_PIN = { pipeline: "pipeline3_organic_injected", mode: "normal" };
+let DETECT_RUN = null;
+
+const runModels = () => DETECT_OPTIONS.filter(
+  (m) => m.pipeline === DETECT_RUN.pipeline && m.mode === DETECT_RUN.mode);
+
+function setBtn(cls, text) {
+  const b = $("#b-detect");
+  b.className = "detect-btn" + (cls ? " " + cls : "");
+  b.textContent = text;
+}
+
+function fillClf() {
+  const emb = $("#d-emb").value;
+  $("#d-clf").innerHTML = runModels().filter((m) => m.emb === emb)
+    .map((m) => `<option value="${esc(m.clf)}">${esc(m.clf)}</option>`).join("");
+}
+
 async function loadDetectOptions() {
   let opts = {};
   try { opts = await fetchJSON("/api/detect/options"); } catch { opts = {}; }
   DETECT_OPTIONS = opts.models || [];
-  const note = $("#detect-note");
-  const sel = $("#d-model");
-  const btn = $("#b-detect");
+  const msg = $("#detect-msg");
   if (!DETECT_OPTIONS.length) {
-    note.textContent = opts.reason
+    msg.textContent = opts.reason
       ? `${opts.reason}. ${opts.fix}.`
-      : "No saved models found. Run a pipeline with “save models” checked (Runs tab), then come back.";
-    sel.innerHTML = `<option>— none available —</option>`;
-    btn.disabled = true;
+      : "No saved models found — queue a run with “save models” checked (Run tab), then come back.";
+    msg.className = "d-note msg warn";
+    $("#b-detect").disabled = true;
+    $("#b-sample").disabled = true;
     return;
   }
-  btn.disabled = false;
-  note.textContent = "Scores one (intent, context) pair with a trained classifier. minilm embeds locally in ms; openai needs an API key; qwen3 loads a 4B model into VRAM on first use.";
-  sel.innerHTML = DETECT_OPTIONS.map((m, i) =>
-    `<option value="${i}">${pShort(m.pipeline)} / ${MODE_SHORT[m.mode]} · ${m.emb} + ${m.clf}</option>`).join("");
+  $("#b-detect").disabled = false;
+  $("#b-sample").disabled = false;
+  msg.textContent = "";
+  DETECT_RUN = DETECT_OPTIONS.find(
+    (m) => m.pipeline === DETECT_PIN.pipeline && m.mode === DETECT_PIN.mode) || DETECT_OPTIONS[0];
+  $("#d-emb").innerHTML = [...new Set(runModels().map((m) => m.emb))]
+    .map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join("");
+  fillClf();
 }
+$("#d-emb").addEventListener("change", fillClf);
 
 $("#b-sample").addEventListener("click", async () => {
   const msg = $("#detect-msg");
-  msg.textContent = "sampling…"; msg.className = "msg";
+  msg.textContent = "sampling…"; msg.className = "d-note msg";
   try {
-    const data = await fetchJSON(`/api/sample?pipeline=${$("#d-sample-pipeline").value}`);
+    const data = await fetchJSON(`/api/sample?pipeline=${DETECT_RUN.pipeline}`);
     const row = data.rows[0];
     $("#d-intent").value = row.user_intent || "";
     $("#d-context").value = row.context || "";
     $("#d-context").dataset.truth = row.label;
-    msg.textContent = `loaded a labeled row (ground truth hidden until you detect)`;
-  } catch (e) { msg.textContent = e.message; msg.className = "msg warn"; }
+    msg.textContent = "loaded a labeled row — ground truth stays hidden until you detect";
+  } catch (e) { msg.textContent = e.message; msg.className = "d-note msg warn"; }
 });
 
 $("#b-detect").addEventListener("click", async () => {
-  const m = DETECT_OPTIONS[parseInt($("#d-model").value, 10)];
-  const msg = $("#detect-msg");
-  if (!m) { msg.textContent = "no model selected"; msg.className = "msg error"; return; }
-  msg.textContent = "embedding + scoring…"; msg.className = "msg";
+  const msg = $("#detect-msg"), detail = $("#detect-detail");
+  const clf = $("#d-clf").value;
+  if (!clf) { msg.textContent = "no classifier selected"; msg.className = "d-note msg error"; return; }
+  msg.textContent = ""; msg.className = "d-note msg"; detail.textContent = "";
+  setBtn("loading", "Loading…");
   $("#b-detect").disabled = true;
   try {
     const res = await fetchJSON("/api/detect", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        pipeline: m.pipeline, mode: m.mode, emb: m.emb, clf: m.clf,
+        pipeline: DETECT_RUN.pipeline, mode: DETECT_RUN.mode, emb: $("#d-emb").value, clf,
         user_intent: $("#d-intent").value, context: $("#d-context").value,
       }),
     });
-    msg.textContent = "";
-    $("#detect-result").style.display = "";
-    const badge = $("#verdict-badge");
-    badge.textContent = res.verdict.toUpperCase();
-    badge.className = "verdict " + res.verdict;
-    $("#gauge-fill").style.width = (res.probability * 100).toFixed(1) + "%";
-    $("#gauge-label").textContent = (res.probability * 100).toFixed(1) + "%";
-    $("#detect-timing").textContent = `embed ${res.embed_ms} ms · classify ${res.classify_ms} ms · ${res.emb} + ${res.clf}, trained on ${pShort(res.pipeline)}/${MODE_SHORT[res.mode]}`;
+    setBtn(res.verdict, res.verdict === "malicious" ? "Detected MALICIOUS INTENT" : "Prompt is SAFE");
     const truth = $("#d-context").dataset.truth;
-    $("#detect-truth").textContent = truth !== undefined && truth !== ""
-      ? `dataset ground truth for this row: ${truth === "1" ? "malicious" : "benign"}` : "";
+    detail.textContent =
+      `${(res.probability * 100).toFixed(1)}% confidence · embed ${res.embed_ms} ms · `
+      + `classify ${res.classify_ms} ms · ${res.emb} + ${res.clf} trained on `
+      + `${pShort(res.pipeline)}/${MODE_SHORT[res.mode]}`
+      + (truth ? ` · dataset ground truth: ${truth === "1" ? "malicious" : "benign"}` : "");
   } catch (e) {
-    msg.textContent = e.message; msg.className = "msg error";
+    setBtn("", "Detect");
+    msg.textContent = e.message; msg.className = "d-note msg error";
   } finally { $("#b-detect").disabled = false; }
 });
+
+// editing either field invalidates the verdict sitting on the button
 ["#d-intent", "#d-context"].forEach((id) => $(id).addEventListener("input", () => {
   delete $("#d-context").dataset.truth;
-  $("#detect-truth").textContent = "";
+  $("#detect-detail").textContent = "";
+  setBtn("", "Detect");
 }));
 
 /* ================= files tab ================= */

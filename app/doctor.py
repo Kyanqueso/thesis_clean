@@ -48,7 +48,7 @@ def main() -> None:
         print("  -> no per-sample probabilities: /api/curves and /api/breakdown "
               "report unavailable until a run is redone locally")
     if not cap["n_runs_with_models"]:
-        print("  -> no saved classifiers: the Detect tab stays disabled until a run "
+        print("  -> no saved classifiers: the Simulation tab stays disabled until a run "
               "is redone with save models")
     if not d["runs_exists"] or not cap["n_runs_with_results"]:
         print("\nNothing found. Point the dashboard at the tree explicitly, e.g.:")

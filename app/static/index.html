@@ -4,15 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>thesis_clean dashboard</title>
-<link rel="stylesheet" href="/static/style.css?v=10">
+<link rel="stylesheet" href="/static/style.css?v=12">
 </head>
 <body>
 <header>
   <h1>Prompt-Injection Detection</h1>
   <nav>
-    <button class="tab-btn active" data-tab="runs">Runs</button>
-    <button class="tab-btn" data-tab="results">Results</button>
-    <button class="tab-btn" data-tab="detect">Detect</button>
+    <button class="tab-btn active" data-tab="runs">Run</button>
+    <button class="tab-btn" data-tab="detect">Simulation</button>
+    <button class="tab-btn" data-tab="results">Analysis</button>
     <button class="tab-btn" data-tab="files">Files</button>
   </nav>
   <div id="queue-pill" class="pill">idle</div>
@@ -83,7 +83,7 @@
   <div class="card" id="no-results-card" style="display:none">
     <h2>No results yet</h2>
     <p class="muted">No <code>runs/*/*/results/full_evaluation_results.csv</code> found.
-    Launch a run from the Runs tab (a smoke run with limit≈500 + minilm finishes in minutes),
+    Launch a run from the Run tab (a smoke run with limit≈500 + minilm finishes in minutes),
     or drop your supervisor's <code>runs/</code> folder into the repo root.</p>
   </div>
 
@@ -147,30 +147,37 @@
 
 <!-- ============ DETECT TAB ============ -->
 <section class="tab" id="tab-detect">
-  <div class="card">
-    <h2>Live detection</h2>
-    <p class="muted" id="detect-note"></p>
-    <div class="row wrap gap">
-      <label class="field grow"><span>Model</span><select id="d-model"></select></label>
-      <label class="field"><span>Sample from</span><select id="d-sample-pipeline"></select></label>
-      <button class="btn small" id="b-sample">Load random dataset row</button>
-    </div>
-    <label class="field"><span>User intent</span>
-      <textarea id="d-intent" rows="2" placeholder="e.g. Summarize the following article."></textarea></label>
-    <label class="field"><span>External content (context)</span>
-      <textarea id="d-context" rows="10" placeholder="Paste the retrieved document / email / web page here…"></textarea></label>
-    <div class="row gap">
-      <button class="btn primary" id="b-detect">Detect</button>
-      <span class="msg" id="detect-msg"></span>
-    </div>
-    <div id="detect-result" style="display:none">
-      <div class="verdict-row">
-        <div id="verdict-badge" class="verdict"></div>
-        <div class="gauge"><div id="gauge-fill"></div></div>
-        <div id="gauge-label" class="gauge-label"></div>
+  <div class="detect-col">
+    <h2 class="detect-title">Live detection</h2>
+
+    <input id="d-intent" class="d-input" placeholder="Enter intent here">
+
+    <div class="d-box">
+      <textarea id="d-context" rows="10" placeholder="Paste external context here"></textarea>
+      <div class="d-tools">
+        <button class="btn small" id="b-sample" title="Fill both fields from a random labeled dataset row">random row</button>
+        <select id="d-emb" class="d-select" title="Embedding model"></select>
+        <select id="d-clf" class="d-select" title="Classifier"></select>
       </div>
-      <div class="muted" id="detect-timing"></div>
-      <div class="muted" id="detect-truth"></div>
+    </div>
+
+    <button class="detect-btn" id="b-detect">Detect</button>
+    <div class="d-note msg" id="detect-msg"></div>
+    <div class="d-note muted" id="detect-detail"></div>
+
+    <div class="card" id="detect-help">
+      <h2>Instructions</h2>
+      <ul>
+        <li>Needs a run with saved classifiers. Run tab → keep <b>save models</b> checked → they land in
+          <code>runs/&lt;pipeline&gt;/&lt;mode&gt;/models/*.joblib</code>. Without them this tab stays disabled.</li>
+        <li>Both fields matter in <b>normal</b> mode: the context and the intent are joined with a separator
+          and embedded as one text, exactly as the pipeline did at training time.</li>
+        <li><b>minilm</b> embeds locally in milliseconds. <b>openai</b> needs <code>OPENAI_API_KEY</code> in
+          <code>.env</code>. <b>qwen3</b> loads a 4B model into VRAM on first use — slow first call, fast after.</li>
+        <li><b>random row</b> pulls a labeled row from the dataset; its ground truth stays hidden until you detect,
+          so you can guess first.</li>
+        <li>Verdict is the classifier's probability at a <b>0.50</b> threshold; the exact confidence prints under the button.</li>
+      </ul>
     </div>
   </div>
 </section>
@@ -201,6 +208,6 @@
 </section>
 </main>
 
-<script src="/static/app.js?v=8"></script>
+<script src="/static/app.js?v=9"></script>
 </body>
 </html>
