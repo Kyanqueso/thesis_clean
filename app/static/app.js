@@ -395,6 +395,7 @@ async function refreshJobs() {
   // one log, always the newest job — no per-row log buttons to hunt through
   const newest = jobs[0];
   $("#log-wrap").hidden = !newest;
+  if (!newest) openLogJob = null; // server restarted: the old job is gone, stop polling it
   if (newest && newest.id !== openLogJob) {
     openLogJob = newest.id;
     logOffset = 0;
