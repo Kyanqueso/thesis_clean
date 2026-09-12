@@ -43,7 +43,7 @@ def options() -> dict:
         "models": [],
         "reason": ("no saved classifiers in this tree — delivered runs ship results "
                    "and figures, but no models/ directory"),
-        "fix": ("queue a run from the Runs tab with “save models” checked (it is on "
+        "fix": ("queue a run from the Run tab with “save models” checked (it is on "
                 "by default); the models land in <run>/models/*.joblib"),
     }
 

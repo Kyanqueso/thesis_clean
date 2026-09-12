@@ -4,92 +4,130 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>thesis_clean dashboard</title>
-<link rel="stylesheet" href="/static/style.css?v=10">
+<link rel="stylesheet" href="/static/style.css?v=29">
 </head>
 <body>
 <header>
   <h1>Prompt-Injection Detection</h1>
   <nav>
-    <button class="tab-btn active" data-tab="runs">Runs</button>
-    <button class="tab-btn" data-tab="results">Results</button>
-    <button class="tab-btn" data-tab="detect">Detect</button>
+    <button class="tab-btn" data-tab="runs">Run</button>
+    <button class="tab-btn active" data-tab="detect">Simulation</button>
+    <button class="tab-btn" data-tab="results">Analysis</button>
     <button class="tab-btn" data-tab="files">Files</button>
   </nav>
   <div id="queue-pill" class="pill">idle</div>
 </header>
 
 <main>
-<!-- ============ RUNS TAB ============ -->
-<section class="tab active" id="tab-runs">
-  <div class="grid-2">
-    <div class="card">
-      <h2>Datasets</h2>
-      <div class="muted mono" id="paths-line"></div>
-      <table class="plain" id="datasets-table"></table>
-      <div class="row gap">
-        <button class="btn small" id="b-ds-alamsabi">Download P1 dataset (HF)</button>
-        <button class="btn small" id="b-ds-organic">Build P2 + P3 datasets</button>
+<!-- ============ RUN TAB ============ -->
+<section class="tab" id="tab-runs">
+
+  <div class="card hero">
+    <div class="wiz-dots" id="wiz-dots" hidden><i></i><i></i><i></i></div>
+
+    <div class="step" data-step="0">
+      <div class="startup">
+        <h3 class="startup-h">Instructions before running</h3>
+        <ol id="startup"></ol>
+      </div>
+      <button class="btn-hero" id="b-run">Run</button>
+    </div>
+
+    <div class="step" data-step="1" hidden>
+      <h3 class="wiz-title">What do you want to run?</h3>
+      <div class="choices">
+        <button class="choice" id="b-run-all">
+          <b>Run all</b>
+          <small>Every pipeline and ablation, on the full dataset.</small></button>
+        <button class="choice" id="b-advanced">
+          <b>Advanced</b>
+          <small>Choose exactly which runs to do.</small></button>
+      </div>
+      <div class="step-nav one">
+        <button class="linkback" data-back="0">Back</button>
       </div>
     </div>
-    <div class="card">
-      <h2>Launch</h2>
-      <div class="row wrap gap">
-        <label class="field"><span>Pipeline</span><select id="f-pipeline"></select></label>
-        <label class="field"><span>Mode</span><select id="f-mode">
-          <option value="normal">normal</option>
-          <option value="user_intent_only">user_intent_only</option>
-          <option value="context_only">context_only</option>
-        </select></label>
-        <label class="field"><span>Limit (rows)</span><input type="number" id="f-limit" placeholder="all" min="1"></label>
-      </div>
-      <div class="field"><span>Embeddings</span>
-        <div class="checks">
-          <label class="chip-toggle"><input type="checkbox" class="f-model" value="openai"><span>openai</span></label>
-          <label class="chip-toggle"><input type="checkbox" class="f-model" value="qwen3"><span>qwen3</span></label>
-          <label class="chip-toggle"><input type="checkbox" class="f-model" value="minilm" checked><span>minilm</span></label>
+
+    <div class="step" data-step="2" hidden>
+      <h3 class="wiz-title">Pick what to run</h3>
+      <p class="wiz-sub">Every cell is one run. A check means results already exist.
+        Click a name to take a whole row or column.</p>
+
+      <div id="matrix-grid" class="mgrid"></div>
+      <p class="muted note" id="matrix-note" hidden></p>
+
+      <label class="smoke">
+        <input type="checkbox" id="f-smoke">
+        <span class="smoke-txt">Smoke test on the first
+          <input type="number" id="f-limit" value="500" min="1"> rows</span>
+      </label>
+
+      <details class="adv">
+        <summary>More settings</summary>
+        <div class="adv-body">
+          <div class="checks emb-picker">
+            <label class="chip-toggle"><input type="checkbox" class="f-model" value="minilm" checked><span>minilm</span></label>
+            <label class="chip-toggle"><input type="checkbox" class="f-model" value="openai"><span>openai</span></label>
+            <label class="chip-toggle"><input type="checkbox" class="f-model" value="qwen3"><span>qwen3</span></label>
+          </div>
+          <label class="field seed-field"><span>Seed</span>
+            <input type="number" id="f-seed" value="42" min="0"></label>
+          <div class="checks">
+            <label class="chip-toggle"><input type="checkbox" id="f-save-models" checked><span>save models</span></label>
+            <label class="chip-toggle"><input type="checkbox" id="f-skip-proj"><span>skip projections</span></label>
+            <label class="chip-toggle"><input type="checkbox" id="f-force"><span>force re-embed</span></label>
+          </div>
         </div>
-      </div>
-      <div class="field"><span>Options</span>
-        <div class="checks">
-          <label class="chip-toggle"><input type="checkbox" id="f-force"><span>force re-embed</span></label>
-          <label class="chip-toggle"><input type="checkbox" id="f-save-models" checked><span>save models</span></label>
-          <label class="chip-toggle"><input type="checkbox" id="f-skip-proj"><span>skip projections</span></label>
-        </div>
-      </div>
-      <div class="row gap">
-        <button class="btn primary" id="b-run">Queue run</button>
-        <button class="btn" id="b-sweep">Queue FULL sweep (9 runs)</button>
-        <span class="msg" id="launch-msg"></span>
+      </details>
+
+      <div class="step-nav">
+        <button class="linkback" data-back="1">Back</button>
+        <button class="btn primary" id="b-review">Review</button>
       </div>
     </div>
+
+    <div class="step" data-step="3" hidden>
+      <div id="review-body"></div>
+      <div class="step-nav">
+        <button class="linkback" data-back="2">Back</button>
+        <button class="btn primary" id="b-confirm-run">Start</button>
+      </div>
+    </div>
+
+    <div class="msg" id="launch-msg"></div>
   </div>
 
   <div class="card">
-    <h2>Run matrix <span class="muted">— pipeline × ablation mode · E embeddings · R results · F figures · M models</span></h2>
-    <table class="plain" id="matrix-table"></table>
-    <p class="muted" id="matrix-note" style="display:none"></p>
+    <h2>Activity</h2>
+    <div class="prog" id="prog" hidden>
+      <div class="prog-bar"><i id="prog-fill"></i></div>
+      <span class="prog-txt" id="prog-txt"></span>
+    </div>
+    <div id="activity-line" class="act-line"></div>
+    <div id="activity-recent"></div>
+    <details id="log-wrap" hidden><summary id="log-sum">Log</summary><pre id="job-log" class="log"></pre></details>
   </div>
 
-  <div class="card">
-    <h2>Jobs</h2>
-    <table class="plain" id="jobs-table"></table>
-    <pre id="job-log" class="log" style="display:none"></pre>
+  <div class="card" id="results-preview" hidden>
+    <h2>Results</h2>
+    <div class="scroll"><table id="preview-table"></table></div>
+    <button class="btn primary" id="b-show-analysis">Show analysis</button>
   </div>
 </section>
 
 <!-- ============ RESULTS TAB ============ -->
 <section class="tab" id="tab-results">
+  <div id="verdict-strip" class="verdicts"></div>
   <div class="pipe-chips" id="pipe-chips"></div>
   <div class="card" id="no-results-card" style="display:none">
     <h2>No results yet</h2>
     <p class="muted">No <code>runs/*/*/results/full_evaluation_results.csv</code> found.
-    Launch a run from the Runs tab (a smoke run with limit≈500 + minilm finishes in minutes),
+    Launch a run from the Run tab (a smoke run with limit≈500 + minilm finishes in minutes),
     or drop your supervisor's <code>runs/</code> folder into the repo root.</p>
   </div>
 
   <div class="card" id="master-card">
-    <h2>Master results <span class="muted">— every pipeline in one grid: detection quality,
-      what each ablation costs, and whether that cost is significant</span></h2>
+    <h2>Master results</h2>
     <div class="row wrap gap">
       <label class="field"><span>Reference mode</span><select id="ms-reference">
         <option value="normal">normal</option>
@@ -98,30 +136,26 @@
       </select></label>
       <label class="field"><span>Δ metric</span><select id="ms-metric"></select></label>
       <label class="field"><span>Rows</span><select id="ms-collapse">
+        <option value="best" selected>best per pipeline × embedding</option>
         <option value="all">every classifier</option>
-        <option value="best">best classifier per pipeline × embedding</option>
       </select></label>
       <label class="chip-toggle"><input type="checkbox" id="ms-cost"><span>cost columns</span></label>
       <button class="btn small" id="ms-copy">Copy as CSV</button>
       <span class="msg" id="ms-msg"></span>
     </div>
-    <div class="scroll"><table id="master-table" class="master"></table></div>
     <div id="master-notes"></div>
-    <p class="muted">Δ is <b>absolute performance degradation</b> in percentage points:
-      reference − ablated, so positive means the ablation <b>hurt</b>. A non-positive Δ on
-      intent-only means the classes separate without the injection — a corpus shortcut, not
-      detection. <b>p</b> is a paired McNemar test (Holm-corrected) between the reference run
-      and the ablated run on the same frozen test rows.</p>
-  </div>
-
-  <div class="card" id="headline-card">
-    <h2>Headline <span class="muted">— best configuration per run (by ROC-AUC)</span></h2>
-    <div class="scroll"><table id="headline-table"></table></div>
+    <div class="scroll"><table id="master-table" class="master"></table></div>
+    <details class="why"><summary>How to read Δ and p</summary>
+      <p class="muted note">Δ is absolute degradation in percentage points: reference − ablated,
+        so positive means the ablation <b>hurt</b>. A non-positive Δ on intent-only means the
+        classes separate without the injection — a corpus shortcut, not detection.
+        <b>p</b> is a paired McNemar test (Holm-corrected) on the same frozen test rows.</p>
+    </details>
   </div>
 
   <div class="card" id="ablation-card">
-    <h2>Ablation <span class="muted">— best ROC-AUC per mode: does the signal come from the context, the intent, or the pair?</span></h2>
-    <div class="scroll"><table id="ablation-table"></table></div>
+    <h2>Ablation <span class="muted">— does the signal come from the context or the intent?</span></h2>
+    <div id="ablation-chart"></div>
   </div>
 
   <div class="card" id="allrows-card">
@@ -137,7 +171,7 @@
   </div>
 
   <div class="card" id="figures-card">
-    <h2>Static figures <span class="muted">— PNGs written by the pipeline for the selected run</span></h2>
+    <h2>Figures</h2>
     <div class="row wrap gap">
       <label class="field"><span>Run</span><select id="fig-run"></select></label>
     </div>
@@ -146,31 +180,38 @@
 </section>
 
 <!-- ============ DETECT TAB ============ -->
-<section class="tab" id="tab-detect">
-  <div class="card">
-    <h2>Live detection</h2>
-    <p class="muted" id="detect-note"></p>
-    <div class="row wrap gap">
-      <label class="field grow"><span>Model</span><select id="d-model"></select></label>
-      <label class="field"><span>Sample from</span><select id="d-sample-pipeline"></select></label>
-      <button class="btn small" id="b-sample">Load random dataset row</button>
-    </div>
-    <label class="field"><span>User intent</span>
-      <textarea id="d-intent" rows="2" placeholder="e.g. Summarize the following article."></textarea></label>
-    <label class="field"><span>External content (context)</span>
-      <textarea id="d-context" rows="10" placeholder="Paste the retrieved document / email / web page here…"></textarea></label>
-    <div class="row gap">
-      <button class="btn primary" id="b-detect">Detect</button>
-      <span class="msg" id="detect-msg"></span>
-    </div>
-    <div id="detect-result" style="display:none">
-      <div class="verdict-row">
-        <div id="verdict-badge" class="verdict"></div>
-        <div class="gauge"><div id="gauge-fill"></div></div>
-        <div id="gauge-label" class="gauge-label"></div>
+<section class="tab active" id="tab-detect">
+  <div class="detect-col">
+    <h2 class="detect-title">Live detection</h2>
+
+    <input id="d-intent" class="d-input" placeholder="Enter intent here">
+
+    <div class="d-box">
+      <textarea id="d-context" rows="10" placeholder="Paste external context here"></textarea>
+      <div class="d-tools">
+        <button class="btn small" id="b-sample" title="Fill both fields from a random labeled dataset row">random row</button>
+        <select id="d-emb" class="d-select" title="Embedding model"></select>
+        <select id="d-clf" class="d-select" title="Classifier"></select>
       </div>
-      <div class="muted" id="detect-timing"></div>
-      <div class="muted" id="detect-truth"></div>
+    </div>
+
+    <button class="detect-btn" id="b-detect">Detect</button>
+    <div class="d-note msg" id="detect-msg"></div>
+    <div class="d-note muted" id="detect-detail"></div>
+
+    <div class="card" id="detect-help">
+      <h2>Instructions</h2>
+      <ul>
+        <li>Needs a run with saved classifiers. Run tab → keep <b>save models</b> checked → they land in
+          <code>runs/&lt;pipeline&gt;/&lt;mode&gt;/models/*.joblib</code>. Without them this tab stays disabled.</li>
+        <li>Both fields matter in <b>normal</b> mode: the context and the intent are joined with a separator
+          and embedded as one text, exactly as the pipeline did at training time.</li>
+        <li><b>minilm</b> embeds locally in milliseconds. <b>openai</b> needs <code>OPENAI_API_KEY</code> in
+          <code>.env</code>. <b>qwen3</b> loads a 4B model into VRAM on first use — slow first call, fast after.</li>
+        <li><b>random row</b> pulls a labeled row from the dataset; its ground truth stays hidden until you detect,
+          so you can guess first.</li>
+        <li>Verdict is the classifier's probability at a <b>0.50</b> threshold; the exact confidence prints under the button.</li>
+      </ul>
     </div>
   </div>
 </section>
@@ -178,11 +219,12 @@
 <!-- ============ FILES TAB ============ -->
 <section class="tab" id="tab-files">
   <div class="card">
-    <h2>Artifact explorer <span class="muted">— every file the pipeline schema expects, present or missing, plus anything extra found on disk</span></h2>
+    <h2>Files</h2>
+    <p class="note muted">Input datasets and embeddings must be completed before running the classifiers.</p>
     <div id="files-list"><span class="muted">Loading…</span></div>
   </div>
   <div class="card" id="peek-card">
-    <h2>Dataset peek <span class="muted">— random labeled rows straight from the jsonl files</span></h2>
+    <h2>Dataset peek</h2>
     <div class="row wrap gap">
       <label class="field"><span>Dataset</span><select id="pk-pipeline"></select></label>
       <label class="field"><span>Rows</span><select id="pk-n">
@@ -194,13 +236,18 @@
     <div class="scroll"><table id="peek-table"></table></div>
   </div>
 
-  <div class="card" id="file-preview-card" style="display:none">
-    <h2 id="file-preview-title" style="font-family:var(--mono)"></h2>
-    <div id="file-preview"></div>
-  </div>
 </section>
 </main>
 
-<script src="/static/app.js?v=8"></script>
+<!-- quick peek at one artifact; <dialog> brings its own backdrop + Esc-to-close -->
+<dialog id="peek-dlg">
+  <header>
+    <h3 id="peek-path"></h3>
+    <button class="ghost" id="peek-close" aria-label="Close preview">&#10005;</button>
+  </header>
+  <div id="peek-body"></div>
+</dialog>
+
+<script src="/static/app.js?v=28"></script>
 </body>
 </html>

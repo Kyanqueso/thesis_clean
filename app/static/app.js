@@ -5,7 +5,7 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 const MODE_SHORT = { normal: "normal", user_intent_only: "intent-only", context_only: "context-only" };
-/* pipeline focus for the headline/ablation cards (persisted; defaults to P3) */
+/* pipeline focus; drives every card on the Analysis tab (persisted, defaults to P3) */
 const ALL_PIPES = ["pipeline1_alamsabi", "pipeline2_organic_bipia", "pipeline3_organic_injected"];
 let PIPE_FOCUS;
 try { PIPE_FOCUS = new Set(JSON.parse(localStorage.getItem("pipeFocus"))); } catch { /* fall through */ }
@@ -13,7 +13,7 @@ if (!PIPE_FOCUS || !PIPE_FOCUS.size) PIPE_FOCUS = new Set(["pipeline3_organic_in
 
 function renderPipeChips() {
   const el = $("#pipe-chips");
-  el.innerHTML = `<span class="lbl">Focus</span>` + ALL_PIPES.map((p) =>
+  el.innerHTML = `<span class="lbl">Focus — all cards</span>` + ALL_PIPES.map((p) =>
     `<span class="pipe-chip ${PIPE_FOCUS.has(p) ? "sel" : ""}" data-pipe="${p}" title="${esc(pLabel(p))}">${pShort(p)}</span>`).join("");
   $$(".pipe-chip").forEach((c) => c.addEventListener("click", () => {
     const p = c.dataset.pipe;
@@ -25,11 +25,59 @@ function renderPipeChips() {
     }
     try { localStorage.setItem("pipeFocus", JSON.stringify([...PIPE_FOCUS])); } catch {}
     renderPipeChips();
-    renderHeadline();
+    renderMaster();
     renderAblation();
+    renderResultsTable();
   }));
 }
 const focusedResults = () => RESULTS.filter((r) => PIPE_FOCUS.has(r.Pipeline));
+
+/* Verdict thresholds, on best ROC-AUC per pipeline per mode. Intent-only scoring
+   high means the label is readable without any injection — a corpus artifact, not
+   detection. Move these two numbers to change what the strip claims. */
+const SHORTCUT_AUC = 0.90;   // intent-only at or above this = corpus shortcut
+const CHANCE_AUC = 0.60;     // intent-only at or below this = no signal without the injection
+const DETECT_AUC = 0.80;     // normal must clear this to count as detecting
+
+const SHORTCUT_CHIP = `<span class="chip shortcut" title="Scored from the user intent alone — the classes separate without any injection content (corpus shortcut, not detection)">shortcut</span>`;
+const isShortcut = (r) => r.Mode === "user_intent_only" && r["ROC-AUC"] >= SHORTCUT_AUC;
+
+/* Best ROC-AUC per mode for one pipeline, plus the verdict that follows from it. */
+function pipelineVerdict(pipeline) {
+  const best = {};
+  for (const r of RESULTS) {
+    if (r.Pipeline !== pipeline) continue;
+    if (best[r.Mode] === undefined || r["ROC-AUC"] > best[r.Mode]) best[r.Mode] = r["ROC-AUC"];
+  }
+  const normal = best.normal, intent = best.user_intent_only;
+  let verdict = "inconclusive";
+  if (intent >= SHORTCUT_AUC) verdict = "shortcut";
+  else if (intent <= CHANCE_AUC && normal >= DETECT_AUC) verdict = "detects";
+  if (normal === undefined && intent === undefined) verdict = "no runs";
+  return { pipeline, normal, intent, context: best.context_only, verdict };
+}
+
+const VERDICT_NOTE = {
+  detects: "intent alone is near chance — the signal is in the injected context",
+  shortcut: "intent alone already separates the classes — corpus artifact",
+  inconclusive: "neither clearly detecting nor clearly a shortcut",
+  "no runs": "no results for this pipeline yet",
+};
+
+function renderVerdicts() {
+  const cards = ALL_PIPES.map(pipelineVerdict).filter((v) => v.verdict !== "no runs");
+  const auc = (v) => (typeof v === "number" ? fmt(v, 4) : "—");
+  $("#verdict-strip").innerHTML = cards.map((v) => `<div class="verdict ${v.verdict}">
+    <div class="v-head"><b>${esc(pShort(v.pipeline))}</b>
+      <span class="v-tag">${v.verdict}</span></div>
+    <div class="v-name">${esc(pLabel(v.pipeline).replace(/^P\d+\s*·\s*/, ""))}</div>
+    <div class="v-nums">
+      <span>normal <b>${auc(v.normal)}</b></span>
+      <span>intent-only <b>${auc(v.intent)}</b></span>
+    </div>
+    <div class="v-why muted">${VERDICT_NOTE[v.verdict]}</div>
+  </div>`).join("");
+}
 
 /* in-cell micro bar: value scaled from 0.5 (empty) to 1.0 (full) */
 const microbar = (v) => typeof v === "number"
@@ -41,6 +89,8 @@ let RESULTS = [];        // /api/results rows
 let DETECT_OPTIONS = []; // /api/detect/options
 let openLogJob = null;
 let logOffset = 0;
+let LOG_TEXT = "";       // full log of the newest job, for the progress scrape
+let PREVIEW_FOR = null;  // job id whose results are already previewed
 
 async function fetchJSON(url, opts) {
   const r = await fetch(url, opts);
@@ -62,25 +112,51 @@ $$(".tab-btn").forEach((b) => b.addEventListener("click", () => {
   if (b.dataset.tab === "files") { loadFiles(); loadPeek(); }
 }));
 
-/* ================= runs tab ================= */
+/* ================= run tab ================= */
+/* Embeddings and results ship with the repo, so the dashboard no longer builds
+   datasets — it selects cells and trains classifiers over what is already on
+   disk. The matrix is the selector; one button runs the selection. */
+/* The grid is the picker: each cell is one run, and carries two independent
+   facts — selected for this launch, and whether results already exist. */
+const SELECTED = new Set();      // "pipeline|mode"
+let LAST_RUN_KEYS = new Set();   // what the most recent launch covered
+let SEL_INIT = false;
+
 async function refreshState() {
   try { STATE = await fetchJSON("/api/state"); } catch { return; }
-  renderPaths();
-  renderDatasets();
+  // preselect only what can actually run: a pipeline with no dataset on disk
+  // would otherwise sit checked and silently do nothing. A flag, not an
+  // emptiness test, so clearing every cell by hand stays cleared.
+  if (!SEL_INIT) {
+    SEL_INIT = true;
+    for (const p of Object.keys(STATE.pipelines)) {
+      if (!(STATE.datasets[p] && STATE.datasets[p].info)) continue;
+      for (const m of STATE.modes) SELECTED.add(`${p}|${m}`);
+    }
+  }
+  renderStartup();
   renderCapabilities();
   renderMatrix();
-  fillPipelineSelects();
 }
 
-function renderPaths() {
-  const p = STATE.paths;
-  if (!p) return;
-  const mark = (ok) => (ok ? "on" : "");
-  const write = p.split_write
-    ? ` · <span class="badge">writes → ${esc(p.runs_write_dir)}</span>` : "";
-  $("#paths-line").innerHTML =
-    `reading <span class="badge ${mark(p.data_exists)}">${esc(p.data_dir)}</span>
-     and <span class="badge ${mark(p.runs_exists)}">${esc(p.runs_dir)}</span>${write}`;
+/* Three lines above the hero button: what has to be on disk before a run means
+   anything. Counts come from the same /api/state the matrix reads, so the two
+   can never disagree about what is there. */
+function renderStartup() {
+  if (!STATE) return;
+  const ds = Object.values(STATE.datasets);
+  const nData = ds.filter((x) => x.info).length;
+  const nEmb = STATE.runs.filter((r) => Object.values(r.embeddings).some(Boolean)).length;
+  const files = `<button class="tablink" data-goto="files">files</button>`;
+  $("#startup").innerHTML = [
+    `Add the dataset (${nData}/${ds.length}). Check ${files}.`,
+    `Add embeddings (${nEmb}/${STATE.runs.length}). Check ${files}.`,
+    "Press <b>Run</b> and pick what to train.",
+  ].map((t) => `<li>${t}</li>`).join("");
+  // click the real tab button rather than duplicating the switch logic, so this
+  // cannot drift from however tabs actually work
+  $$("#startup .tablink").forEach((b) => b.addEventListener("click",
+    () => $(`.tab-btn[data-tab="${b.dataset.goto}"]`).click()));
 }
 
 // delivered artifacts carry results + figures but no models or per-sample
@@ -88,55 +164,130 @@ function renderPaths() {
 function renderCapabilities() {
   const c = STATE.capabilities;
   const el = $("#matrix-note");
-  if (!c) { el.style.display = "none"; return; }
+  if (!c) { el.hidden = true; return; }
   const gaps = [];
-  if (!c.n_runs_with_predictions) gaps.push("per-sample probabilities (predictions.npz)");
-  if (!c.n_runs_with_models) gaps.push("saved classifiers (models/)");
-  if (!gaps.length) { el.style.display = "none"; return; }
-  el.style.display = "";
-  el.innerHTML = `This tree has results for ${c.n_runs_with_results}/9 runs but no ${gaps.join(" and ")}. `
-    + `Tables and figures work; live detection and curve/breakdown APIs need a run redone here `
-    + `(Queue run, “save models” on) — the delivered artifacts do not include them.`;
-}
-
-function renderDatasets() {
-  const rows = Object.entries(STATE.datasets).map(([key, d]) => {
-    const info = d.info
-      ? `<span class="badge on">present</span> <span class="muted">${d.info.size_mb} MB</span>`
-      : `<span class="badge">missing</span>`;
-    return `<tr><td>${esc(d.label)}</td><td class="muted">${esc(d.file)}</td><td>${info}</td></tr>`;
-  }).join("");
-  $("#datasets-table").innerHTML = `<tr><th>Pipeline</th><th>File</th><th>Status</th></tr>${rows}`;
+  if (!c.n_runs_with_predictions) gaps.push("per-sample probabilities");
+  if (!c.n_runs_with_models) gaps.push("saved classifiers");
+  if (!gaps.length) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = `No ${gaps.join(" or ")} on disk yet. Running produces them.`;
 }
 
 function renderMatrix() {
+  if (!STATE) return;
   const modes = STATE.modes;
-  let html = `<tr><th>Pipeline</th>${modes.map((m) => `<th>${MODE_SHORT[m]}</th>`).join("")}</tr>`;
+  let html = `<div class="mhead"></div>`
+    + modes.map((m) => `<button class="mhead-btn" data-col="${m}"
+        title="Take the whole ${MODE_SHORT[m]} column">${MODE_SHORT[m]}</button>`).join("");
+
   for (const p of Object.keys(STATE.pipelines)) {
-    html += `<tr><td>${esc(pLabel(p))}</td>`;
+    const hasData = !!(STATE.datasets[p] && STATE.datasets[p].info);
+    html += `<button class="mname" data-row="${p}" title="Take the whole ${esc(pShort(p))} row">
+      <b>${esc(pShort(p))}</b>
+      <span class="mname-full">${esc(pLabel(p).replace(/^P\d+\s*·\s*/, ""))}</span>
+    </button>`;
+
     for (const m of modes) {
-      const run = STATE.runs.find((r) => r.pipeline === p && r.mode === m);
-      const nEmb = Object.values(run.embeddings).filter(Boolean).length;
-      const embCls = nEmb === 3 ? "on" : nEmb > 0 ? "part" : "";
-      const cell = [
-        `<span class="badge ${embCls}">E ${nEmb}/3</span>`,
-        `<span class="badge ${run.has_results ? "on" : ""}">R</span>`,
-        `<span class="badge ${run.figures.length ? "on" : ""}">F ${run.figures.length}</span>`,
-        `<span class="badge ${run.models.length ? "on" : ""}">M ${run.models.length}</span>`,
-      ].join("");
-      html += `<td>${cell}</td>`;
+      const run = STATE.runs.find((r) => r.pipeline === p && r.mode === m) || {};
+      const key = `${p}|${m}`;
+      const why = run.has_results ? "Results already exist" : "Not run yet";
+      html += `<button class="mcell${SELECTED.has(key) ? " on" : ""}${
+        run.has_results ? " done" : ""}${hasData ? "" : " locked"}"
+        data-key="${key}" ${hasData ? "" : "disabled"}
+        title="${why}${hasData ? "" : ", and the dataset is missing"}">
+        <span class="mcell-mark">${run.has_results ? "✓" : ""}</span>
+      </button>`;
     }
-    html += "</tr>";
   }
-  $("#matrix-table").innerHTML = html;
+  $("#matrix-grid").innerHTML = html;
+
+  // a cell toggles itself; a name toggles its whole row or column
+  const take = (keys) => {
+    const all = keys.every((k) => SELECTED.has(k));
+    keys.forEach((k) => (all ? SELECTED.delete(k) : SELECTED.add(k)));
+    renderMatrix();
+    updateReviewBtn();
+  };
+  $$("#matrix-grid .mcell").forEach((b) =>
+    b.addEventListener("click", () => take([b.dataset.key])));
+  $$("#matrix-grid [data-row]").forEach((b) =>
+    b.addEventListener("click", () => take(STATE.modes.map((m) => `${b.dataset.row}|${m}`))));
+  $$("#matrix-grid [data-col]").forEach((b) =>
+    b.addEventListener("click", () =>
+      take(Object.keys(STATE.pipelines).map((p) => `${p}|${b.dataset.col}`))));
 }
 
-function fillPipelineSelects() {
-  const opts = Object.keys(STATE.pipelines)
-    .map((p) => `<option value="${p}">${esc(pLabel(p))}</option>`).join("");
-  for (const id of ["#f-pipeline", "#d-sample-pipeline"]) {
-    const el = $(id);
-    if (el && !el.dataset.filled) { el.innerHTML = opts; el.dataset.filled = "1"; }
+function updateReviewBtn() {
+  const n = SELECTED.size;
+  const btn = $("#b-review");
+  btn.disabled = !n;
+  btn.textContent = n ? `Review ${n} run${n === 1 ? "" : "s"}` : "Nothing picked";
+}
+
+/* one place builds the params, so the hero button and every matrix cell can
+   never disagree about what the current settings mean */
+function runParams() {
+  const seed = parseInt($("#f-seed").value, 10);
+  const p = {
+    models: $$(".f-model").filter((c) => c.checked).map((c) => c.value).join(","),
+    force: $("#f-force").checked,
+    save_models: $("#f-save-models").checked,
+    skip_projections: $("#f-skip-proj").checked,
+  };
+  // a row limit is what makes it a smoke test, and the backend reroutes those
+  // to a separate folder so they cannot overwrite delivered results
+  if ($("#f-smoke").checked) {
+    p.limit = Math.max(1, parseInt($("#f-limit").value, 10) || 500);
+  }
+  // the pipeline hardcodes SEED=42 and takes no --seed argument yet; this is
+  // sent so the backend can honour it once one exists
+  if (seed >= 0) p.seed = seed;
+  return p;
+}
+
+/* ---- wizard ---- */
+function goStep(n) {
+  $$(".step").forEach((s) => (s.hidden = +s.dataset.step !== n));
+  $("#wiz-dots").hidden = n === 0;
+  $$("#wiz-dots i").forEach((d, i) => d.classList.toggle("on", i < n));
+  launchMsg("");
+  if (n === 2) { renderMatrix(); updateReviewBtn(); }
+  if (n === 3) renderReview();
+}
+
+function renderReview() {
+  const p = runParams();
+  const byPipe = {};
+  for (const k of SELECTED) {
+    const [pi, m] = k.split("|");
+    (byPipe[pi] = byPipe[pi] || []).push(MODE_SHORT[m]);
+  }
+  const n = SELECTED.size;
+  const rows = Object.keys(STATE.pipelines).filter((pi) => byPipe[pi]).map((pi) =>
+    `<div class="rev-row"><b>${esc(pShort(pi))}</b>
+      <span>${esc(byPipe[pi].join(", "))}</span></div>`).join("");
+  $("#review-body").innerHTML =
+    `<h3 class="wiz-title">${n} run${n === 1 ? "" : "s"}</h3>
+     <div class="rev-list">${rows}</div>
+     <dl class="rev-meta">
+       <div><dt>Embeddings</dt><dd>${esc(p.models || "none picked")}</dd></div>
+       <div><dt>Dataset</dt><dd>${p.limit ? `first ${p.limit} rows` : "every row"}</dd></div>
+       <div><dt>Seed</dt><dd>${p.seed ?? 42}</dd></div>
+     </dl>`;
+  const btn = $("#b-confirm-run");
+  btn.textContent = `Start ${n} run${n === 1 ? "" : "s"}`;
+  btn.disabled = !n || !p.models;
+}
+
+/* a full nine is exactly the sweep stage, which is cheaper and prints the
+   per-step banners the progress bar counts */
+function launchSelected(keys, params) {
+  if (!keys.size) return;
+  LAST_RUN_KEYS = new Set(keys);
+  if (keys.size === 9) return queueJob("sweep", params);
+  for (const k of keys) {
+    const [pipeline, mode] = k.split("|");
+    queueJob("run", { ...params, pipeline, mode });
   }
 }
 
@@ -157,82 +308,141 @@ async function queueJob(stage, params, msgFn = launchMsg) {
   } catch (e) { msgFn(String(e.message || e), "error"); }
 }
 
-$("#b-ds-alamsabi").addEventListener("click", () => queueJob("dataset", { which: "alamsabi" }));
-$("#b-ds-organic").addEventListener("click", () => queueJob("dataset", { which: "organic" }));
+$("#b-run").addEventListener("click", () => goStep(1));
+$("#b-advanced").addEventListener("click", () => goStep(2));
+$("#b-review").addEventListener("click", () => goStep(3));
+$$("[data-back]").forEach((b) =>
+  b.addEventListener("click", () => goStep(+b.dataset.back)));
 
-$("#b-run").addEventListener("click", () => {
-  const models = $$(".f-model").filter((c) => c.checked).map((c) => c.value).join(",");
-  if (!models) return launchMsg("select at least one embedding model", "error");
-  const params = {
-    pipeline: $("#f-pipeline").value,
-    mode: $("#f-mode").value,
-    models,
-    force: $("#f-force").checked,
-    save_models: $("#f-save-models").checked,
-    skip_projections: $("#f-skip-proj").checked,
-  };
-  const limit = parseInt($("#f-limit").value, 10);
-  if (limit > 0) params.limit = limit;
-  queueJob("run", params);
+// "Run all" ignores the advanced controls entirely: fixed, predictable defaults
+$("#b-run-all").addEventListener("click", () => {
+  if (!STATE) return;
+  if (!confirm("This runs all nine configurations with minilm on the full dataset, "
+      + "which can take hours. Continue?")) return;
+  const all = new Set();
+  for (const p of Object.keys(STATE.pipelines))
+    for (const m of STATE.modes) all.add(`${p}|${m}`);
+  launchSelected(all, { models: "minilm", force: false, save_models: true, skip_projections: false });
+  goStep(0);
 });
 
-$("#b-sweep").addEventListener("click", () => {
-  if (!confirm("Queue the FULL sweep: 3 pipelines × 3 modes, all selected embedding models. This can take many hours. Continue?")) return;
-  const models = $$(".f-model").filter((c) => c.checked).map((c) => c.value).join(",");
-  const params = {
-    force: $("#f-force").checked,
-    save_models: $("#f-save-models").checked,
-    skip_projections: $("#f-skip-proj").checked,
-  };
-  if (models) params.models = models;
-  const limit = parseInt($("#f-limit").value, 10);
-  if (limit > 0) params.limit = limit;
-  queueJob("sweep", params);
+$("#b-confirm-run").addEventListener("click", () => {
+  const p = runParams();
+  if (!p.models) return launchMsg("Pick at least one embedding under More settings.", "error");
+  if (!p.limit && !confirm("This runs on the full dataset and can take hours. Continue?")) return;
+  launchSelected(SELECTED, p);
+  goStep(0);
 });
 
-/* -------- jobs table + log -------- */
+$("#f-smoke").addEventListener("change", () => $("#f-limit").disabled = !$("#f-smoke").checked);
+$("#f-limit").disabled = true;
+
+$("#b-show-analysis").addEventListener("click", () =>
+  $$(".tab-btn").find((b) => b.dataset.tab === "results").click());
+
+/* -------- activity strip -------- */
+const jobLabel = (j) =>
+  j.stage === "sweep" ? "all 9 runs" :
+  j.stage === "dataset" ? `dataset: ${j.params.which}` :
+  j.stage === "run" ? `${pShort(j.params.pipeline)} / ${MODE_SHORT[j.params.mode]}` : j.stage;
+
+/* Job times arrive as epoch seconds. Rows carry a short local stamp with the
+   full date-time on hover, so "when did this run?" survives a page reload. */
+const stampOf = (t) => new Date(t * 1000).toLocaleString([],
+  { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const clockOf = (t) => new Date(t * 1000).toLocaleTimeString([],
+  { hour: "2-digit", minute: "2-digit" });
+
 async function refreshJobs() {
   let data;
   try { data = await fetchJSON("/api/jobs"); } catch { return; }
   const jobs = data.jobs;
-  const busy = jobs.some((j) => j.status === "running" || j.status === "queued");
-  const pill = $("#queue-pill");
-  pill.textContent = busy ? `${jobs.filter((j) => j.status === "running").length} running / ${jobs.filter((j) => j.status === "queued").length} queued` : "idle";
-  pill.classList.toggle("busy", busy);
+  const running = jobs.find((j) => j.status === "running");
+  const queued = jobs.filter((j) => j.status === "queued").length;
 
-  if (!jobs.length) {
-    $("#jobs-table").innerHTML = `<tr><td class="muted">No jobs yet — queue one above.</td></tr>`;
-    return;
+  const pill = $("#queue-pill");
+  pill.textContent = running ? `running${queued ? ` · ${queued} queued` : ""}` : "idle";
+  pill.classList.toggle("busy", !!running || queued > 0);
+
+  // the queue runs one job at a time, so "what is running" is a single line
+  $("#activity-line").innerHTML = running
+    ? `<span class="spinner"></span><b>${esc(jobLabel(running))}</b>
+       <span class="muted">since ${esc(clockOf(running.started))}, ${Math.round(Date.now() / 1000 - running.started)}s${queued ? `, ${queued} queued` : ""}</span>
+       <button class="btn small danger" data-cancel="${running.id}">cancel</button>`
+    : `<span class="muted">${jobs.length ? "Nothing running." : "Nothing has run yet. Press Run to start one."}</span>`;
+
+  $("#activity-recent").innerHTML = jobs.filter((j) => j.status !== "running").slice(0, 5)
+    .map((j) => {
+      const dur = j.started && j.finished ? `${Math.round(j.finished - j.started)}s` : "";
+      const at = j.finished || j.started || j.created;
+      return `<div class="act-row"><span class="status ${j.status}">${j.status}</span>
+        <span class="act-what">${esc(jobLabel(j))}</span>
+        <time class="act-time" title="${esc(new Date(at * 1000).toLocaleString())}">${esc(stampOf(at))}</time>
+        <span class="act-dur">${dur}</span></div>`;
+    }).join("");
+
+  // the log belongs to the newest job, so date the disclosure with its start
+  const latest = jobs[0];
+  if (latest) {
+    $("#log-sum").innerHTML = `Log <span class="muted">${esc(stampOf(latest.created))}</span>`;
   }
-  const rows = jobs.map((j) => {
-    const dur = j.started ? Math.round(((j.finished || Date.now() / 1000) - j.started)) : 0;
-    const what = j.stage === "run" ? `${pShort(j.params.pipeline)} / ${MODE_SHORT[j.params.mode]}` :
-                 j.stage === "sweep" ? "full sweep" :
-                 j.stage === "dataset" ? `dataset: ${j.params.which}` : j.stage;
-    const extra = [j.params.models, j.params.limit ? `limit=${j.params.limit}` : ""].filter(Boolean).join(" · ");
-    const cancel = (j.status === "running" || j.status === "queued")
-      ? `<button class="btn small danger" data-cancel="${j.id}">cancel</button>` : "";
-    return `<tr>
-      <td class="muted">${j.id}</td><td>${esc(what)}</td><td class="muted">${esc(extra)}</td>
-      <td><span class="status ${j.status}">${j.status}</span></td>
-      <td class="num">${dur ? dur + "s" : ""}</td>
-      <td><button class="btn small" data-log="${j.id}">log</button> ${cancel}</td>
-    </tr>`;
-  }).join("");
-  $("#jobs-table").innerHTML = `<tr><th>id</th><th>Job</th><th></th><th>Status</th><th class="num">Time</th><th></th></tr>${rows}`;
 
   $$("[data-cancel]").forEach((b) => b.addEventListener("click", async () => {
     try { await fetchJSON(`/api/jobs/${b.dataset.cancel}/cancel`, { method: "POST" }); } catch {}
     refreshJobs();
   }));
-  $$("[data-log]").forEach((b) => b.addEventListener("click", () => {
-    if (openLogJob === b.dataset.log) { openLogJob = null; $("#job-log").style.display = "none"; return; }
-    openLogJob = b.dataset.log;
+
+  // one log, always the newest job — no per-row log buttons to hunt through
+  const newest = jobs[0];
+  $("#log-wrap").hidden = !newest;
+  if (newest && newest.id !== openLogJob) {
+    openLogJob = newest.id;
     logOffset = 0;
+    LOG_TEXT = "";
     $("#job-log").textContent = "";
-    $("#job-log").style.display = "block";
-    pollLog();
-  }));
+  }
+
+  renderProgress(running);
+  if (newest && newest.status === "done" && newest.id !== PREVIEW_FOR) {
+    PREVIEW_FOR = newest.id;
+    loadPreview();
+  }
+}
+
+/* ponytail: progress is a STEP COUNT scraped from markers the pipeline already
+   prints — ">>> label" per step in a sweep, "$ cmd" per step otherwise. Nothing
+   in the job API reports a percentage, so the bar moves in whole steps and the
+   estimate is a linear extrapolation. Replace both the moment a job exposes
+   real progress. */
+const fmtDur = (s) => (s >= 3600 ? `${Math.round(s / 360) / 10}h`
+  : s >= 60 ? `${Math.round(s / 60)}m` : `${s}s`);
+
+function renderProgress(job) {
+  const box = $("#prog");
+  if (!job) { box.hidden = true; return; }
+  const total = job.stage === "sweep" ? 18 : ((job.cmds || []).length || 2);
+  const started = (LOG_TEXT.match(job.stage === "sweep" ? /^>>> /gm : /^\$ /gm) || []).length;
+  const done = Math.max(0, Math.min(total, started - 1));   // a marker means STARTED
+  const frac = total ? done / total : 0;
+  const elapsed = Math.max(0, Date.now() / 1000 - job.started);
+  const left = frac > 0.02 ? Math.round(elapsed * (1 - frac) / frac) : null;
+  box.hidden = false;
+  $("#prog-fill").style.width = `${Math.round(frac * 100)}%`;
+  $("#prog-txt").textContent = `${done}/${total}` + (left ? ` · ~${fmtDur(left)} left` : "");
+}
+
+async function loadPreview() {
+  let rows;
+  try { rows = (await fetchJSON("/api/results")).rows; } catch { return; }
+  const best = rows.filter((r) => LAST_RUN_KEYS.has(`${r.Pipeline}|${r.Mode}`))
+    .sort((a, b) => (b["ROC-AUC"] ?? 0) - (a["ROC-AUC"] ?? 0)).slice(0, 6);
+  if (!best.length) return;
+  $("#preview-table").innerHTML =
+    `<tr><th>Run</th><th>Emb</th><th>Classifier</th><th class="num">ROC-AUC</th><th class="num">F1</th></tr>`
+    + best.map((r) => `<tr><td>${pShort(r.Pipeline)}/${MODE_SHORT[r.Mode]}</td>
+        <td>${esc(r.Embeddings)}</td><td>${esc(r.Classifier)}</td>
+        <td class="num">${fmt(r["ROC-AUC"])}</td><td class="num">${fmt(r["F1-Score"])}</td></tr>`).join("");
+  $("#results-preview").hidden = false;
 }
 
 async function pollLog() {
@@ -243,6 +453,7 @@ async function pollLog() {
       const el = $("#job-log");
       const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
       el.textContent += data.text;
+      LOG_TEXT += data.text;
       logOffset = data.offset;
       if (stick) el.scrollTop = el.scrollHeight;
     }
@@ -255,12 +466,12 @@ async function loadResults() {
   try { RESULTS = (await fetchJSON("/api/results")).rows; } catch { RESULTS = []; }
   const empty = !RESULTS.length;
   $("#no-results-card").style.display = empty ? "" : "none";
-  for (const id of ["#master-card", "#headline-card", "#ablation-card", "#allrows-card", "#figures-card"])
+  for (const id of ["#master-card", "#ablation-card", "#allrows-card", "#figures-card"])
     $(id).style.display = empty ? "none" : "";
   if (empty) return;
+  renderVerdicts();
   renderPipeChips();
   loadMaster();
-  renderHeadline();
   renderAblation();
   fillResultFilters();
   renderResultsTable();
@@ -297,7 +508,7 @@ async function loadMaster() {
 
 function masterRows() {
   if (!MASTER) return [];
-  let rows = MASTER.rows;
+  let rows = MASTER.rows.filter((r) => PIPE_FOCUS.has(r.Pipeline));
   if ($("#ms-collapse").value === "best") {
     const best = {};
     for (const r of rows) {
@@ -338,28 +549,38 @@ function renderMaster() {
   if (!MASTER) return;
   const metric = $("#ms-metric").value || "ROC-AUC";
   const showCost = $("#ms-cost").checked;
-  const vars = MASTER.variants;
   const rows = masterRows();
 
-  const q = ["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC", "PR-AUC"];
+  /* Delivered runs predate several metrics, so whole column groups arrive empty.
+     An em-dash grid reads as a broken table; drop what has no data anywhere. */
+  const has = (key) => rows.some((r) => typeof r[key] === "number");
+  const q = ["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC", "PR-AUC"].filter(has);
+  const errs = ["FPR", "FNR"].filter(has);
+  const degVars = MASTER.variants.filter((v) => has(`Deg:${v}:${metric}`));
+  const sigVars = MASTER.variants.filter((v) => has(`Sig:${v}:p_holm`));
+  const cost = showCost ? MASTER_COST.filter(([k]) => has(k)) : [];
+  const dropped = (6 - q.length) + (2 - errs.length)
+    + (MASTER.variants.length - sigVars.length) + (MASTER.variants.length - degVars.length);
+
   const qShort = { "Accuracy": "Acc", "Precision": "Prec", "Recall": "Rec",
                    "F1-Score": "F1", "ROC-AUC": "ROC-AUC", "PR-AUC": "PR-AUC" };
 
   // two-tier header: group band on top, columns beneath
+  const band = (n, label) => (n ? `<th colspan="${n}">${label}</th>` : "");
   let head = `<tr class="grp">
     <th colspan="4">Configuration</th>
-    <th colspan="${q.length}">Detection — ${esc(MODE_SHORT[MASTER.reference])}</th>
-    <th colspan="2">Errors</th>
-    <th colspan="${vars.length}">Ablation Δ ${esc(metric)} (pp)</th>
-    <th colspan="${vars.length}">McNemar p (Holm)</th>
-    ${showCost ? `<th colspan="${MASTER_COST.length}">Cost</th>` : ""}
+    ${band(q.length, `Detection — ${esc(MODE_SHORT[MASTER.reference])}`)}
+    ${band(errs.length, "Errors")}
+    ${band(degVars.length, `Ablation Δ ${esc(metric)} (pp)`)}
+    ${band(sigVars.length, "McNemar p (Holm)")}
+    ${band(cost.length, "Cost")}
     </tr>`;
   head += `<tr><th>Pipeline</th><th>Emb</th><th>Classifier</th><th></th>
     ${q.map((m) => `<th class="num">${qShort[m]}</th>`).join("")}
-    <th class="num">FPR</th><th class="num">FNR</th>
-    ${vars.map((v) => `<th class="num">→${MODE_SHORT[v]}</th>`).join("")}
-    ${vars.map((v) => `<th class="num">→${MODE_SHORT[v]}</th>`).join("")}
-    ${showCost ? MASTER_COST.map(([, l]) => `<th class="num">${l}</th>`).join("") : ""}
+    ${errs.map((e) => `<th class="num">${e}</th>`).join("")}
+    ${degVars.map((v) => `<th class="num">→${MODE_SHORT[v]}</th>`).join("")}
+    ${sigVars.map((v) => `<th class="num">→${MODE_SHORT[v]}</th>`).join("")}
+    ${cost.map(([, l]) => `<th class="num">${l}</th>`).join("")}
     </tr>`;
 
   let body = "", lastPipe = null;
@@ -372,15 +593,20 @@ function renderMaster() {
       <td class="wrapcell" title="${esc(pLabel(r.Pipeline))}">${esc(pShort(r.Pipeline))}</td>
       <td>${esc(r.Embeddings)}</td><td>${esc(r.Classifier)}</td><td>${flags}</td>
       ${q.map((m) => `<td class="num">${mfmt(r[m])}</td>`).join("")}
-      <td class="num">${mfmt(r.FPR)}</td><td class="num">${mfmt(r.FNR)}</td>
-      ${vars.map((v) => degCell(r[`Deg:${v}:${metric}`], r[`Sig:${v}:significant`], v)).join("")}
-      ${vars.map((v) => pCell(r[`Sig:${v}:p_holm`], r[`Sig:${v}:significant`])).join("")}
-      ${showCost ? MASTER_COST.map(([k, , p]) => `<td class="num">${mfmt(r[k], p)}</td>`).join("") : ""}
+      ${errs.map((e) => `<td class="num">${mfmt(r[e])}</td>`).join("")}
+      ${degVars.map((v) => degCell(r[`Deg:${v}:${metric}`], r[`Sig:${v}:significant`], v)).join("")}
+      ${sigVars.map((v) => pCell(r[`Sig:${v}:p_holm`], r[`Sig:${v}:significant`])).join("")}
+      ${cost.map(([k, , p]) => `<td class="num">${mfmt(r[k], p)}</td>`).join("")}
       </tr>`;
   }
   $("#master-table").innerHTML = head + body;
-  $("#master-notes").innerHTML = (MASTER.notes || [])
-    .map((n) => `<p class="muted note">ⓘ ${esc(n)}</p>`).join("");
+
+  const notes = MASTER.notes || [];
+  $("#master-notes").innerHTML = notes.length
+    ? `<details class="why"><summary>${dropped} empty column${dropped === 1 ? "" : "s"} hidden${
+        dropped ? " — " : ""}why these runs have no per-sample metrics</summary>
+       ${notes.map((n) => `<p class="muted note">${esc(n)}</p>`).join("")}</details>`
+    : "";
   $("#ms-msg").textContent = `${rows.length} row${rows.length === 1 ? "" : "s"}`;
 }
 
@@ -403,63 +629,70 @@ $("#ms-copy").addEventListener("click", async () => {
   } catch { $("#ms-msg").textContent = "clipboard blocked — select the table and copy"; }
 });
 
-function renderHeadline() {
-  const best = {};
-  for (const r of focusedResults()) {
-    const k = runKey(r);
-    if (!best[k] || r["ROC-AUC"] > best[k]["ROC-AUC"]) best[k] = r;
-  }
-  const rows = Object.values(best)
-    .sort((a, b) => b["ROC-AUC"] - a["ROC-AUC"])
-    .map((r, i) => {
-      // near-perfect intent-only means the class is readable without the injection: corpus shortcut
-      const shortcut = r.Mode === "user_intent_only" && r["ROC-AUC"] >= 0.99
-        ? `<span class="chip shortcut" title="Near-perfect from the user intent alone — the classes are separable without any injection content (corpus-style shortcut)">shortcut</span>` : "";
-      return `<tr class="${i === 0 ? "best" : ""}">
-      <td class="wrapcell">${esc(pLabel(r.Pipeline))}</td><td>${MODE_SHORT[r.Mode]}${shortcut}</td>
-      <td>${esc(r.Embeddings)}</td><td>${esc(r.Classifier)}</td><td>${flags}</td>
-      <td class="num">${fmt(r.Accuracy)}</td><td class="num">${fmt(r["F1-Score"])}</td>
-      <td class="num">${fmt(r["ROC-AUC"])}${microbar(r["ROC-AUC"])}</td><td class="num">${fmt(r["PR-AUC"])}</td>
-      <td class="num">${fmt(r["Inference-Time-per-Sample(ms)"], 4)}</td>
-    </tr>`;
-    }).join("");
-  $("#headline-table").innerHTML =
-    `<tr><th>Pipeline</th><th>Mode</th><th>Emb</th><th>Classifier</th>
-      <th class="num">Acc</th><th class="num">F1</th><th class="num">ROC-AUC</th>
-      <th class="num">PR-AUC</th><th class="num">ms/sample</th></tr>${rows}`;
+/* Grouped horizontal bars, one group per pipeline x embedding, one bar per mode.
+   Categorical slots 1-3 of the validated dark palette (blue/orange/aqua) - the
+   three modes are identities, not statuses, so they get categorical hues and the
+   verdict strip carries the good/bad judgement.
+   The x axis starts at 0.5 because that is ROC-AUC chance, not a zoom: bar length
+   reads directly as "how far above chance", which is the question being asked. */
+const MODE_HUE = { normal: "var(--m-normal)", user_intent_only: "var(--m-intent)", context_only: "var(--m-context)" };
+const AB_GEO = { w: 820, pad: 118, right: 44, bar: 11, gap: 3, group: 16, top: 26 };
+
+/* rounded data-end, square against the baseline */
+function barPath(x, y, w, h, r = 4) {
+  const k = Math.min(r, w);
+  if (w <= 0) return "";
+  return `M${x},${y} H${x + w - k} a${k},${k} 0 0 1 ${k},${k} V${y + h - k} a${k},${k} 0 0 1 ${-k},${k} H${x} Z`;
 }
 
 function renderAblation() {
-  // best ROC-AUC per pipeline × embedding × mode
   const cell = {};
-  const pipes = new Set(), embs = new Set();
+  const groups = [];
   for (const r of focusedResults()) {
-    pipes.add(r.Pipeline); embs.add(r.Embeddings);
-    const k = `${r.Pipeline}|${r.Embeddings}|${r.Mode}`;
-    if (!cell[k] || r["ROC-AUC"] > cell[k]) cell[k] = r["ROC-AUC"];
+    const k = `${r.Pipeline}|${r.Embeddings}`;
+    if (!groups.some((g) => g.key === k)) groups.push({ key: k, pipeline: r.Pipeline, emb: r.Embeddings });
+    const ck = `${k}|${r.Mode}`;
+    if (cell[ck] === undefined || r["ROC-AUC"] > cell[ck]) cell[ck] = r["ROC-AUC"];
   }
   const modes = STATE ? STATE.modes : ["normal", "user_intent_only", "context_only"];
-  // heat tint: intent-only cells go red as they rise above chance (shortcut exposure);
-  // normal/context cells go green (legitimate detection strength)
-  const tint = (v, mode) => {
-    if (v === undefined) return "";
-    const strength = Math.max(0, Math.min(1, (v - 0.5) / 0.5));
-    return mode === "user_intent_only"
-      ? `background: rgba(208, 59, 59, ${(strength * 0.34).toFixed(3)})`
-      : `background: rgba(12, 163, 12, ${(strength * 0.22).toFixed(3)})`;
-  };
-  let html = `<tr><th>Pipeline</th><th>Emb</th>${modes.map((m) => `<th class="num">${MODE_SHORT[m]}</th>`).join("")}<th class="num">Δ(normal−context)</th></tr>`;
-  for (const p of pipes) {
-    for (const e of embs) {
-      const vals = modes.map((m) => cell[`${p}|${e}|${m}`]);
-      if (vals.every((v) => v === undefined)) continue;
-      const delta = (vals[0] !== undefined && vals[2] !== undefined) ? vals[0] - vals[2] : undefined;
-      html += `<tr><td>${esc(pShort(p))}</td><td>${esc(e)}</td>
-        ${vals.map((v, i) => `<td class="num" style="${tint(v, modes[i])}">${v === undefined ? "—" : fmt(v)}</td>`).join("")}
-        <td class="num">${delta === undefined ? "—" : (delta >= 0 ? "+" : "") + fmt(delta)}</td></tr>`;
-    }
-  }
-  $("#ablation-table").innerHTML = html;
+  const { w, pad, right, bar, gap, group, top } = AB_GEO;
+  const plot = w - pad - right;
+  const rowH = modes.length * bar + (modes.length - 1) * gap + group;
+  const h = top + groups.length * rowH + 8;
+  // 0.5 -> 0, 1.0 -> full width; a sub-chance value clamps but still prints exactly
+  const x = (v) => pad + Math.max(0, Math.min(1, (v - 0.5) / 0.5)) * plot;
+
+  const ticks = [0.5, 0.75, 1].map((t) => `
+    <line x1="${x(t)}" y1="${top - 8}" x2="${x(t)}" y2="${h - 8}" class="ab-grid"/>
+    <text x="${x(t)}" y="${top - 12}" class="ab-tick" text-anchor="middle">${t === 0.5 ? "0.50 chance" : t.toFixed(2)}</text>`).join("");
+
+  let body = "";
+  groups.forEach((g, gi) => {
+    const y0 = top + gi * rowH;
+    const mid = y0 + (modes.length * bar + (modes.length - 1) * gap) / 2 + 4;
+    body += `<text x="${pad - 10}" y="${mid}" class="ab-label" text-anchor="end">${esc(pShort(g.pipeline))} · ${esc(g.emb)}</text>`;
+    modes.forEach((m, mi) => {
+      const v = cell[`${g.key}|${m}`];
+      const y = y0 + mi * (bar + gap);
+      if (v === undefined) {
+        body += `<text x="${pad + 4}" y="${y + bar - 1}" class="ab-val ab-none">no run</text>`;
+        return;
+      }
+      const bw = x(v) - pad;
+      body += `<path d="${barPath(pad, y, bw, bar)}" fill="${MODE_HUE[m]}">
+          <title>${esc(pLabel(g.pipeline))} · ${esc(g.emb)} · ${MODE_SHORT[m]} — ROC-AUC ${fmt(v)}</title></path>
+        <text x="${x(v) + 6}" y="${y + bar - 1}" class="ab-val">${fmt(v)}</text>`;
+    });
+  });
+
+  const legend = modes.map((m) =>
+    `<span class="ab-key"><i style="background:${MODE_HUE[m]}"></i>${MODE_SHORT[m]}</span>`).join("");
+
+  $("#ablation-chart").innerHTML = `<div class="ab-legend">${legend}</div>
+    <svg viewBox="0 0 ${w} ${h}" class="ab-svg" role="img"
+      aria-label="Best ROC-AUC per pipeline and embedding, one bar per ablation mode">
+      ${ticks}${body}
+    </svg>`;
 }
 
 function fillResultFilters() {
@@ -472,6 +705,13 @@ function fillResultFilters() {
   };
   fill("#rf-pipeline", [...new Set(RESULTS.map((r) => r.Pipeline))], pShort);
   fill("#rf-mode", [...new Set(RESULTS.map((r) => r.Mode))], (m) => MODE_SHORT[m]);
+  /* Sorting every mode by ROC-AUC puts the intent-only corpus shortcut on top, which
+     reads as the best result. Land on normal; the dropdown still reaches the rest. */
+  const mode = $("#rf-mode");
+  if (!mode.dataset.defaulted) {
+    mode.dataset.defaulted = "1";
+    if ([...mode.options].some((o) => o.value === "normal")) mode.value = "normal";
+  }
   fill("#rf-emb", [...new Set(RESULTS.map((r) => r.Embeddings))]);
   fill("#rf-clf", [...new Set(RESULTS.map((r) => r.Classifier))]);
 }
@@ -485,23 +725,27 @@ function renderResultsTable() {
     Pipeline: $("#rf-pipeline").value, Mode: $("#rf-mode").value,
     Embeddings: $("#rf-emb").value, Classifier: $("#rf-clf").value,
   };
-  let rows = RESULTS.filter((r) => Object.entries(f).every(([k, v]) => !v || r[k] === v));
+  let rows = RESULTS.filter((r) => PIPE_FOCUS.has(r.Pipeline)
+    && Object.entries(f).every(([k, v]) => !v || r[k] === v));
   rows = rows.slice().sort((a, b) => {
     const av = a[sortCol], bv = b[sortCol];
     const c = typeof av === "number" ? av - bv : String(av).localeCompare(String(bv));
     return sortAsc ? c : -c;
   });
-  $("#rf-count").textContent = `${rows.length} of ${RESULTS.length} rows`;
+  const inFocus = RESULTS.filter((r) => PIPE_FOCUS.has(r.Pipeline)).length;
+  $("#rf-count").textContent = `${rows.length} of ${inFocus} rows`;
   const cols = ["Pipeline", "Mode", "Embeddings", "Classifier", "Accuracy", "F1-Score", "ROC-AUC", "PR-AUC", "Train-Time(s)", "Inference-Time-per-Sample(ms)"];
   const numCols = new Set(cols.slice(4));
   const header = cols.map((c) =>
     `<th class="${numCols.has(c) ? "num" : ""}" data-sort="${c}">${c === "Inference-Time-per-Sample(ms)" ? "ms/sample" : c}${sortCol === c ? (sortAsc ? " ▲" : " ▼") : ""}</th>`).join("");
   const body = rows.map((r) => `<tr>${cols.map((c) => {
     let v = r[c];
-    if (c === "Pipeline") v = pShort(v);
-    if (c === "Mode") v = MODE_SHORT[v];
-    const bar = c === "ROC-AUC" ? microbar(v) : "";
-    return `<td class="${numCols.has(c) ? "num" : ""}">${numCols.has(c) ? fmt(v, c.includes("Time") ? 3 : 4) + bar : esc(v)}</td>`;
+    if (numCols.has(c)) {
+      return `<td class="num">${fmt(v, c.includes("Time") ? 3 : 4)}${c === "ROC-AUC" ? microbar(v) : ""}</td>`;
+    }
+    if (c === "Pipeline") return `<td title="${esc(pLabel(v))}">${esc(pShort(v))}</td>`;
+    if (c === "Mode") return `<td>${MODE_SHORT[v]}${isShortcut(r) ? SHORTCUT_CHIP : ""}</td>`;
+    return `<td>${esc(v)}</td>`;
   }).join("")}</tr>`).join("");
   $("#results-table").innerHTML = `<tr>${header}</tr>${body}`;
   $$("#results-table [data-sort]").forEach((th) => th.addEventListener("click", () => {
@@ -540,129 +784,235 @@ function renderFigures() {
 }
 
 /* ================= detect tab ================= */
+/* A saved model is keyed by pipeline × mode × emb × clf, but this tab exposes
+   only two dropdowns. Pipeline/mode are pinned to the headline run — falling
+   back to whatever this tree actually has, so a P1-only tree still works — and
+   the line under the button names the run that answered. */
+const DETECT_PIN = { pipeline: "pipeline3_organic_injected", mode: "normal" };
+let DETECT_RUN = null;
+
+const runModels = () => DETECT_OPTIONS.filter(
+  (m) => m.pipeline === DETECT_RUN.pipeline && m.mode === DETECT_RUN.mode);
+
+function setBtn(cls, text) {
+  const b = $("#b-detect");
+  b.className = "detect-btn" + (cls ? " " + cls : "");
+  b.textContent = text;
+}
+
+function fillClf() {
+  const emb = $("#d-emb").value;
+  $("#d-clf").innerHTML = runModels().filter((m) => m.emb === emb)
+    .map((m) => `<option value="${esc(m.clf)}">${esc(m.clf)}</option>`).join("");
+}
+
 async function loadDetectOptions() {
   let opts = {};
   try { opts = await fetchJSON("/api/detect/options"); } catch { opts = {}; }
   DETECT_OPTIONS = opts.models || [];
-  const note = $("#detect-note");
-  const sel = $("#d-model");
-  const btn = $("#b-detect");
+  const msg = $("#detect-msg");
+  // this is the landing tab, so the empty state stays one short line; the
+  // Instructions card below already spells out how to produce models
   if (!DETECT_OPTIONS.length) {
-    note.textContent = opts.reason
-      ? `${opts.reason}. ${opts.fix}.`
-      : "No saved models found. Run a pipeline with “save models” checked (Runs tab), then come back.";
-    sel.innerHTML = `<option>— none available —</option>`;
-    btn.disabled = true;
+    msg.textContent = "No trained classifiers yet — run one from the Run tab.";
+    msg.className = "d-note msg warn";
+    $("#b-detect").disabled = true;
+    $("#b-sample").disabled = true;
+    $("#d-emb").hidden = true;
+    $("#d-clf").hidden = true;
     return;
   }
-  btn.disabled = false;
-  note.textContent = "Scores one (intent, context) pair with a trained classifier. minilm embeds locally in ms; openai needs an API key; qwen3 loads a 4B model into VRAM on first use.";
-  sel.innerHTML = DETECT_OPTIONS.map((m, i) =>
-    `<option value="${i}">${pShort(m.pipeline)} / ${MODE_SHORT[m.mode]} · ${m.emb} + ${m.clf}</option>`).join("");
+  $("#b-detect").disabled = false;
+  $("#b-sample").disabled = false;
+  $("#d-emb").hidden = false;
+  $("#d-clf").hidden = false;
+  msg.textContent = "";
+  DETECT_RUN = DETECT_OPTIONS.find(
+    (m) => m.pipeline === DETECT_PIN.pipeline && m.mode === DETECT_PIN.mode) || DETECT_OPTIONS[0];
+  $("#d-emb").innerHTML = [...new Set(runModels().map((m) => m.emb))]
+    .map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join("");
+  fillClf();
 }
+$("#d-emb").addEventListener("change", fillClf);
 
 $("#b-sample").addEventListener("click", async () => {
   const msg = $("#detect-msg");
-  msg.textContent = "sampling…"; msg.className = "msg";
+  msg.textContent = "sampling…"; msg.className = "d-note msg";
   try {
-    const data = await fetchJSON(`/api/sample?pipeline=${$("#d-sample-pipeline").value}`);
+    const data = await fetchJSON(`/api/sample?pipeline=${DETECT_RUN.pipeline}`);
     const row = data.rows[0];
     $("#d-intent").value = row.user_intent || "";
     $("#d-context").value = row.context || "";
     $("#d-context").dataset.truth = row.label;
-    msg.textContent = `loaded a labeled row (ground truth hidden until you detect)`;
-  } catch (e) { msg.textContent = e.message; msg.className = "msg warn"; }
+    msg.textContent = "loaded a labeled row — ground truth stays hidden until you detect";
+  } catch (e) { msg.textContent = e.message; msg.className = "d-note msg warn"; }
 });
 
 $("#b-detect").addEventListener("click", async () => {
-  const m = DETECT_OPTIONS[parseInt($("#d-model").value, 10)];
-  const msg = $("#detect-msg");
-  if (!m) { msg.textContent = "no model selected"; msg.className = "msg error"; return; }
-  msg.textContent = "embedding + scoring…"; msg.className = "msg";
+  const msg = $("#detect-msg"), detail = $("#detect-detail");
+  const clf = $("#d-clf").value;
+  if (!clf) { msg.textContent = "no classifier selected"; msg.className = "d-note msg error"; return; }
+  msg.textContent = ""; msg.className = "d-note msg"; detail.textContent = "";
+  setBtn("loading", "Loading…");
   $("#b-detect").disabled = true;
   try {
     const res = await fetchJSON("/api/detect", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        pipeline: m.pipeline, mode: m.mode, emb: m.emb, clf: m.clf,
+        pipeline: DETECT_RUN.pipeline, mode: DETECT_RUN.mode, emb: $("#d-emb").value, clf,
         user_intent: $("#d-intent").value, context: $("#d-context").value,
       }),
     });
-    msg.textContent = "";
-    $("#detect-result").style.display = "";
-    const badge = $("#verdict-badge");
-    badge.textContent = res.verdict.toUpperCase();
-    badge.className = "verdict " + res.verdict;
-    $("#gauge-fill").style.width = (res.probability * 100).toFixed(1) + "%";
-    $("#gauge-label").textContent = (res.probability * 100).toFixed(1) + "%";
-    $("#detect-timing").textContent = `embed ${res.embed_ms} ms · classify ${res.classify_ms} ms · ${res.emb} + ${res.clf}, trained on ${pShort(res.pipeline)}/${MODE_SHORT[res.mode]}`;
+    setBtn(res.verdict, res.verdict === "malicious" ? "Detected MALICIOUS INTENT" : "Prompt is SAFE");
     const truth = $("#d-context").dataset.truth;
-    $("#detect-truth").textContent = truth !== undefined && truth !== ""
-      ? `dataset ground truth for this row: ${truth === "1" ? "malicious" : "benign"}` : "";
+    detail.textContent =
+      `${(res.probability * 100).toFixed(1)}% confidence · embed ${res.embed_ms} ms · `
+      + `classify ${res.classify_ms} ms · ${res.emb} + ${res.clf} trained on `
+      + `${pShort(res.pipeline)}/${MODE_SHORT[res.mode]}`
+      + (truth ? ` · dataset ground truth: ${truth === "1" ? "malicious" : "benign"}` : "");
   } catch (e) {
-    msg.textContent = e.message; msg.className = "msg error";
+    setBtn("", "Detect");
+    msg.textContent = e.message; msg.className = "d-note msg error";
   } finally { $("#b-detect").disabled = false; }
 });
+
+// editing either field invalidates the verdict sitting on the button
 ["#d-intent", "#d-context"].forEach((id) => $(id).addEventListener("input", () => {
   delete $("#d-context").dataset.truth;
-  $("#detect-truth").textContent = "";
+  $("#detect-detail").textContent = "";
+  setBtn("", "Detect");
 }));
 
 /* ================= files tab ================= */
-const openSections = new Set();
+/* Artifacts grouped by kind then pipeline (see runs.file_tree). Missing files
+   are hidden by default — the count in the summary already says how many — and
+   a per-group toggle brings them back when you need the expected filenames. */
+const openSections = new Set();  // node keys the user expanded
+const showMissing = new Set();   // group names whose missing rows are revealed
 
+const EYE = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+  stroke-width="2" stroke-linecap="round" aria-hidden="true"><path
+  d="M1.5 12S5 5.5 12 5.5 22.5 12 22.5 12 19 18.5 12 18.5 1.5 12 1.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>`;
+
+const fmtSize = (b) => (b == null ? ""
+  : b < 1e3 ? `${b} B` : b < 1e6 ? `${(b / 1e3).toFixed(0)} KB` : `${(b / 1e6).toFixed(1)} MB`);
+const nodeCount = (n) => (n.n_expected ? `${n.n_present}/${n.n_expected}` : `${n.n_files} files`);
+const nodeCls = (n) => (n.n_expected
+  ? (n.n_present === n.n_expected ? "on" : n.n_present ? "part" : "")
+  : (n.n_files ? "on" : ""));
+
+function fileRow(e) {
+  const name = e.mode ? `${MODE_SHORT[e.mode] || e.mode} / ${e.label}` : e.label;
+  const when = e.mtime
+    ? new Date(e.mtime * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
+  const extra = e.kind === "unexpected" ? ` <span class="badge part">extra</span>` : "";
+  const click = e.preview ? ` data-view="${esc(e.path)}"` : "";
+  const eye = e.preview
+    ? `<button class="eye" tabindex="-1" aria-label="Preview ${esc(e.label)}">${EYE}</button>` : "";
+  return `<tr class="file-${e.status}"${click} title="${esc(e.path)}">
+    <td class="dot-cell"><i class="dot ${e.status === "present" ? "on" : ""}"
+      aria-label="${e.status}"></i></td>
+    <td class="mono">${esc(name)}${extra}</td>
+    <td class="num">${fmtSize(e.size)}</td>
+    <td class="muted">${when}</td>
+    <td class="eye-cell">${eye}</td></tr>`;
+}
+
+function fileTable(entries, show) {
+  const rows = entries.filter((e) => show || e.status === "present");
+  if (!rows.length) return `<p class="empty muted">nothing here yet</p>`;
+  return `<div class="scroll"><table class="plain files">${rows.map(fileRow).join("")}</table></div>`;
+}
+
+function fileNode(node, key, show, cls) {
+  const body = node.children.length
+    ? node.children.map((c) => fileNode(c, `${key}/${c.name}`, show, "file-sub")).join("")
+    : fileTable(node.entries, show);
+  const nMissing = node.n_expected - node.n_present;
+  const toggle = cls === "file-section" && nMissing
+    ? `<button class="ghost" data-missing="${esc(node.name)}">${show ? "hide" : "show"} ${nMissing} missing</button>`
+    : "";
+  return `<details class="${cls}" data-key="${esc(key)}" ${openSections.has(key) ? "open" : ""}>
+    <summary>${esc(node.name)}
+      <span class="badge ${nodeCls(node)}">${nodeCount(node)}</span>${toggle}</summary>
+    <div class="file-body">${body}</div></details>`;
+}
+
+let FILES_SIG = "";   // last payload rendered; the tab re-polls every 5s
+let FILES_DATA = null;
+
+/* Re-render only when the tree actually changed. Replacing innerHTML on a timer
+   drops hover state and can detach a row mid-click. */
 async function loadFiles() {
   let data;
   try { data = await fetchJSON("/api/files"); }
   catch (e) { $("#files-list").innerHTML = `<span class="msg error">${esc(e.message)}</span>`; return; }
-
-  $("#files-list").innerHTML = data.sections.map((s) => {
-    const anyPresent = s.entries.some((e) => e.status === "present");
-    const isOpen = openSections.size ? openSections.has(s.name) : anyPresent;
-    const cls = s.n_expected && s.n_present === s.n_expected ? "on" : s.n_present ? "part" : "";
-    const count = s.n_expected ? `${s.n_present}/${s.n_expected} expected` : `${s.entries.length} files`;
-    const nExtra = s.entries.filter((e) => e.kind === "unexpected").length;
-    const rows = s.entries.map((e) => {
-      const status = e.status === "present"
-        ? `<span class="badge on">present</span>` : `<span class="badge">missing</span>`;
-      const tag = e.kind === "unexpected" ? ` <span class="badge part">unexpected</span>`
-        : e.kind === "optional" ? ` <span class="badge">output</span>` : "";
-      const when = e.mtime ? new Date(e.mtime * 1000).toLocaleString() : "";
-      const view = e.status === "present"
-        ? `<button class="btn small" data-view="${esc(e.path)}">view</button>` : "";
-      return `<tr class="file-${e.status}"><td>${status}${tag}</td>
-        <td class="mono">${esc(e.path)}</td>
-        <td class="num">${e.size_mb != null ? e.size_mb + " MB" : ""}</td>
-        <td class="muted">${when}</td><td>${view}</td></tr>`;
-    }).join("");
-    return `<details class="file-section" data-name="${esc(s.name)}" ${isOpen ? "open" : ""}>
-      <summary>${esc(s.name)} <span class="badge ${cls}">${count}</span>
-        ${nExtra ? `<span class="badge part">${nExtra} unexpected</span>` : ""}</summary>
-      <div class="scroll"><table class="plain">${rows}</table></div>
-    </details>`;
-  }).join("");
-
-  $$(".file-section").forEach((d) => d.addEventListener("toggle", () => {
-    if (d.open) openSections.add(d.dataset.name); else openSections.delete(d.dataset.name);
-  }));
-  $$("#files-list [data-view]").forEach((b) => b.addEventListener("click", () => previewFile(b.dataset.view)));
+  const sig = JSON.stringify(data);
+  if (sig === FILES_SIG) return;
+  FILES_SIG = sig;
+  FILES_DATA = data;
+  renderFiles();
 }
+
+function renderFiles() {
+  $("#files-list").innerHTML = FILES_DATA.groups
+    .map((g) => fileNode(g, g.name, showMissing.has(g.name), "file-section")).join("");
+
+  $$("#files-list details").forEach((d) => d.addEventListener("toggle", () => {
+    if (d.open) openSections.add(d.dataset.key); else openSections.delete(d.dataset.key);
+  }));
+  /* the toggle lives inside <summary>, whose default action is open/close */
+  $$("#files-list [data-missing]").forEach((b) => b.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const g = b.dataset.missing;
+    if (showMissing.has(g)) showMissing.delete(g); else showMissing.add(g);
+    renderFiles();
+  }));
+  $$("#files-list tr[data-view]").forEach((r) =>
+    r.addEventListener("click", () => previewFile(r.dataset.view)));
+}
+
+/* metrics want 4 decimals; counts like Test-Samples must not become 14000.0000 */
+const cell = (v) => (typeof v !== "number" ? v ?? ""
+  : Number.isInteger(v) ? v : fmt(v, 4));
+
+function previewBody(info) {
+  if (info.type === "image") {
+    return `<img class="preview-img" src="/api/file/raw?path=${encodeURIComponent(PEEK_PATH)}">`;
+  }
+  if (info.type === "table") {
+    const head = `<tr>${info.cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr>`;
+    const body = info.rows.map((r) =>
+      `<tr>${r.map((v) => `<td>${esc(cell(v))}</td>`).join("")}</tr>`).join("");
+    return `<div class="scroll"><table class="plain">${head}${body}</table></div>
+      <p class="note muted">${esc(info.note || "")}</p>`;
+  }
+  return `<pre class="log">${esc(info.text)}</pre>`;
+}
+
+let PEEK_PATH = null;
 
 async function previewFile(path) {
-  const card = $("#file-preview-card");
-  card.style.display = "";
-  $("#file-preview-title").textContent = path;
-  $("#file-preview").innerHTML = `<span class="muted">loading…</span>`;
+  const dlg = $("#peek-dlg");
+  PEEK_PATH = path;
+  $("#peek-path").textContent = path;
+  $("#peek-body").innerHTML = `<span class="muted">loading…</span>`;
+  if (!dlg.open) dlg.showModal();
   try {
     const info = await fetchJSON(`/api/file/inspect?path=${encodeURIComponent(path)}`);
-    $("#file-preview").innerHTML = info.type === "image"
-      ? `<img class="preview-img" src="/api/file/raw?path=${encodeURIComponent(path)}">`
-      : `<pre class="log">${esc(info.text)}</pre>`;
+    if (PEEK_PATH !== path) return;  // a newer peek won the race
+    $("#peek-body").innerHTML = previewBody(info);
   } catch (e) {
-    $("#file-preview").innerHTML = `<span class="msg error">${esc(e.message)}</span>`;
+    $("#peek-body").innerHTML = `<span class="msg error">${esc(e.message)}</span>`;
   }
-  card.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
+
+$("#peek-close").addEventListener("click", () => $("#peek-dlg").close());
+/* clicking the backdrop lands on the dialog itself, never on its children */
+$("#peek-dlg").addEventListener("click", (ev) => {
+  if (ev.target === $("#peek-dlg")) $("#peek-dlg").close();
+});
 
 /* ================= dataset peek (files tab) ================= */
 function fillPeekSelect() {
@@ -704,6 +1054,9 @@ $("#pk-pipeline").addEventListener("change", loadPeek);
 $("#pk-n").addEventListener("change", loadPeek);
 
 /* ================= boot & polling ================= */
+/* Simulation is the landing tab, so its model list must load at boot: the
+   tab-click handler that fills it never fires for the tab you arrive on. */
+loadDetectOptions();
 refreshState();
 refreshJobs();
 setInterval(() => {
