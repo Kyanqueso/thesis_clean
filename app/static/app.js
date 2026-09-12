@@ -41,6 +41,8 @@ let RESULTS = [];        // /api/results rows
 let DETECT_OPTIONS = []; // /api/detect/options
 let openLogJob = null;
 let logOffset = 0;
+let LOG_TEXT = "";       // full log of the newest job, for the progress scrape
+let PREVIEW_FOR = null;  // job id whose results are already previewed
 
 async function fetchJSON(url, opts) {
   const r = await fetch(url, opts);
@@ -62,25 +64,30 @@ $$(".tab-btn").forEach((b) => b.addEventListener("click", () => {
   if (b.dataset.tab === "files") { loadFiles(); loadPeek(); }
 }));
 
-/* ================= runs tab ================= */
+/* ================= run tab ================= */
+/* Embeddings and results ship with the repo, so the dashboard no longer builds
+   datasets — it selects cells and trains classifiers over what is already on
+   disk. The matrix is the selector; one button runs the selection. */
+/* The grid is the picker: each cell is one run, and carries two independent
+   facts — selected for this launch, and whether results already exist. */
+const SELECTED = new Set();      // "pipeline|mode"
+let LAST_RUN_KEYS = new Set();   // what the most recent launch covered
+let SEL_INIT = false;
+
 async function refreshState() {
   try { STATE = await fetchJSON("/api/state"); } catch { return; }
-  renderPaths();
-  renderDatasets();
+  // preselect only what can actually run: a pipeline with no dataset on disk
+  // would otherwise sit checked and silently do nothing. A flag, not an
+  // emptiness test, so clearing every cell by hand stays cleared.
+  if (!SEL_INIT) {
+    SEL_INIT = true;
+    for (const p of Object.keys(STATE.pipelines)) {
+      if (!(STATE.datasets[p] && STATE.datasets[p].info)) continue;
+      for (const m of STATE.modes) SELECTED.add(`${p}|${m}`);
+    }
+  }
   renderCapabilities();
   renderMatrix();
-  fillPipelineSelects();
-}
-
-function renderPaths() {
-  const p = STATE.paths;
-  if (!p) return;
-  const mark = (ok) => (ok ? "on" : "");
-  const write = p.split_write
-    ? ` · <span class="badge">writes → ${esc(p.runs_write_dir)}</span>` : "";
-  $("#paths-line").innerHTML =
-    `reading <span class="badge ${mark(p.data_exists)}">${esc(p.data_dir)}</span>
-     and <span class="badge ${mark(p.runs_exists)}">${esc(p.runs_dir)}</span>${write}`;
 }
 
 // delivered artifacts carry results + figures but no models or per-sample
@@ -88,55 +95,130 @@ function renderPaths() {
 function renderCapabilities() {
   const c = STATE.capabilities;
   const el = $("#matrix-note");
-  if (!c) { el.style.display = "none"; return; }
+  if (!c) { el.hidden = true; return; }
   const gaps = [];
-  if (!c.n_runs_with_predictions) gaps.push("per-sample probabilities (predictions.npz)");
-  if (!c.n_runs_with_models) gaps.push("saved classifiers (models/)");
-  if (!gaps.length) { el.style.display = "none"; return; }
-  el.style.display = "";
-  el.innerHTML = `This tree has results for ${c.n_runs_with_results}/9 runs but no ${gaps.join(" and ")}. `
-    + `Tables and figures work; live detection and curve/breakdown APIs need a run redone here `
-    + `(Queue run, “save models” on) — the delivered artifacts do not include them.`;
-}
-
-function renderDatasets() {
-  const rows = Object.entries(STATE.datasets).map(([key, d]) => {
-    const info = d.info
-      ? `<span class="badge on">present</span> <span class="muted">${d.info.size_mb} MB</span>`
-      : `<span class="badge">missing</span>`;
-    return `<tr><td>${esc(d.label)}</td><td class="muted">${esc(d.file)}</td><td>${info}</td></tr>`;
-  }).join("");
-  $("#datasets-table").innerHTML = `<tr><th>Pipeline</th><th>File</th><th>Status</th></tr>${rows}`;
+  if (!c.n_runs_with_predictions) gaps.push("per-sample probabilities");
+  if (!c.n_runs_with_models) gaps.push("saved classifiers");
+  if (!gaps.length) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = `No ${gaps.join(" or ")} on disk yet. Running produces them.`;
 }
 
 function renderMatrix() {
+  if (!STATE) return;
   const modes = STATE.modes;
-  let html = `<tr><th>Pipeline</th>${modes.map((m) => `<th>${MODE_SHORT[m]}</th>`).join("")}</tr>`;
+  let html = `<div class="mhead"></div>`
+    + modes.map((m) => `<button class="mhead-btn" data-col="${m}"
+        title="Take the whole ${MODE_SHORT[m]} column">${MODE_SHORT[m]}</button>`).join("");
+
   for (const p of Object.keys(STATE.pipelines)) {
-    html += `<tr><td>${esc(pLabel(p))}</td>`;
+    const hasData = !!(STATE.datasets[p] && STATE.datasets[p].info);
+    html += `<button class="mname" data-row="${p}" title="Take the whole ${esc(pShort(p))} row">
+      <b>${esc(pShort(p))}</b>
+      <span class="mname-full">${esc(pLabel(p).replace(/^P\d+\s*·\s*/, ""))}</span>
+    </button>`;
+
     for (const m of modes) {
-      const run = STATE.runs.find((r) => r.pipeline === p && r.mode === m);
-      const nEmb = Object.values(run.embeddings).filter(Boolean).length;
-      const embCls = nEmb === 3 ? "on" : nEmb > 0 ? "part" : "";
-      const cell = [
-        `<span class="badge ${embCls}">E ${nEmb}/3</span>`,
-        `<span class="badge ${run.has_results ? "on" : ""}">R</span>`,
-        `<span class="badge ${run.figures.length ? "on" : ""}">F ${run.figures.length}</span>`,
-        `<span class="badge ${run.models.length ? "on" : ""}">M ${run.models.length}</span>`,
-      ].join("");
-      html += `<td>${cell}</td>`;
+      const run = STATE.runs.find((r) => r.pipeline === p && r.mode === m) || {};
+      const key = `${p}|${m}`;
+      const why = run.has_results ? "Results already exist" : "Not run yet";
+      html += `<button class="mcell${SELECTED.has(key) ? " on" : ""}${
+        run.has_results ? " done" : ""}${hasData ? "" : " locked"}"
+        data-key="${key}" ${hasData ? "" : "disabled"}
+        title="${why}${hasData ? "" : ", and the dataset is missing"}">
+        <span class="mcell-mark">${run.has_results ? "✓" : ""}</span>
+      </button>`;
     }
-    html += "</tr>";
   }
-  $("#matrix-table").innerHTML = html;
+  $("#matrix-grid").innerHTML = html;
+
+  // a cell toggles itself; a name toggles its whole row or column
+  const take = (keys) => {
+    const all = keys.every((k) => SELECTED.has(k));
+    keys.forEach((k) => (all ? SELECTED.delete(k) : SELECTED.add(k)));
+    renderMatrix();
+    updateReviewBtn();
+  };
+  $$("#matrix-grid .mcell").forEach((b) =>
+    b.addEventListener("click", () => take([b.dataset.key])));
+  $$("#matrix-grid [data-row]").forEach((b) =>
+    b.addEventListener("click", () => take(STATE.modes.map((m) => `${b.dataset.row}|${m}`))));
+  $$("#matrix-grid [data-col]").forEach((b) =>
+    b.addEventListener("click", () =>
+      take(Object.keys(STATE.pipelines).map((p) => `${p}|${b.dataset.col}`))));
 }
 
-function fillPipelineSelects() {
-  const opts = Object.keys(STATE.pipelines)
-    .map((p) => `<option value="${p}">${esc(pLabel(p))}</option>`).join("");
-  for (const id of ["#f-pipeline"]) {
-    const el = $(id);
-    if (el && !el.dataset.filled) { el.innerHTML = opts; el.dataset.filled = "1"; }
+function updateReviewBtn() {
+  const n = SELECTED.size;
+  const btn = $("#b-review");
+  btn.disabled = !n;
+  btn.textContent = n ? `Review ${n} run${n === 1 ? "" : "s"}` : "Nothing picked";
+}
+
+/* one place builds the params, so the hero button and every matrix cell can
+   never disagree about what the current settings mean */
+function runParams() {
+  const seed = parseInt($("#f-seed").value, 10);
+  const p = {
+    models: $$(".f-model").filter((c) => c.checked).map((c) => c.value).join(","),
+    force: $("#f-force").checked,
+    save_models: $("#f-save-models").checked,
+    skip_projections: $("#f-skip-proj").checked,
+  };
+  // a row limit is what makes it a smoke test, and the backend reroutes those
+  // to a separate folder so they cannot overwrite delivered results
+  if ($("#f-smoke").checked) {
+    p.limit = Math.max(1, parseInt($("#f-limit").value, 10) || 500);
+  }
+  // the pipeline hardcodes SEED=42 and takes no --seed argument yet; this is
+  // sent so the backend can honour it once one exists
+  if (seed >= 0) p.seed = seed;
+  return p;
+}
+
+/* ---- wizard ---- */
+function goStep(n) {
+  $$(".step").forEach((s) => (s.hidden = +s.dataset.step !== n));
+  $("#wiz-dots").hidden = n === 0;
+  $$("#wiz-dots i").forEach((d, i) => d.classList.toggle("on", i < n));
+  launchMsg("");
+  if (n === 2) { renderMatrix(); updateReviewBtn(); }
+  if (n === 3) renderReview();
+}
+
+function renderReview() {
+  const p = runParams();
+  const byPipe = {};
+  for (const k of SELECTED) {
+    const [pi, m] = k.split("|");
+    (byPipe[pi] = byPipe[pi] || []).push(MODE_SHORT[m]);
+  }
+  const n = SELECTED.size;
+  const rows = Object.keys(STATE.pipelines).filter((pi) => byPipe[pi]).map((pi) =>
+    `<div class="rev-row"><b>${esc(pShort(pi))}</b>
+      <span>${esc(byPipe[pi].join(", "))}</span></div>`).join("");
+  $("#review-body").innerHTML =
+    `<h3 class="wiz-title">${n} run${n === 1 ? "" : "s"}</h3>
+     <div class="rev-list">${rows}</div>
+     <dl class="rev-meta">
+       <div><dt>Embeddings</dt><dd>${esc(p.models || "none picked")}</dd></div>
+       <div><dt>Dataset</dt><dd>${p.limit ? `first ${p.limit} rows` : "every row"}</dd></div>
+       <div><dt>Seed</dt><dd>${p.seed ?? 42}</dd></div>
+     </dl>`;
+  const btn = $("#b-confirm-run");
+  btn.textContent = `Start ${n} run${n === 1 ? "" : "s"}`;
+  btn.disabled = !n || !p.models;
+}
+
+/* a full nine is exactly the sweep stage, which is cheaper and prints the
+   per-step banners the progress bar counts */
+function launchSelected(keys, params) {
+  if (!keys.size) return;
+  LAST_RUN_KEYS = new Set(keys);
+  if (keys.size === 9) return queueJob("sweep", params);
+  for (const k of keys) {
+    const [pipeline, mode] = k.split("|");
+    queueJob("run", { ...params, pipeline, mode });
   }
 }
 
@@ -157,82 +239,141 @@ async function queueJob(stage, params, msgFn = launchMsg) {
   } catch (e) { msgFn(String(e.message || e), "error"); }
 }
 
-$("#b-ds-alamsabi").addEventListener("click", () => queueJob("dataset", { which: "alamsabi" }));
-$("#b-ds-organic").addEventListener("click", () => queueJob("dataset", { which: "organic" }));
+$("#b-run").addEventListener("click", () => goStep(1));
+$("#b-advanced").addEventListener("click", () => goStep(2));
+$("#b-review").addEventListener("click", () => goStep(3));
+$$("[data-back]").forEach((b) =>
+  b.addEventListener("click", () => goStep(+b.dataset.back)));
 
-$("#b-run").addEventListener("click", () => {
-  const models = $$(".f-model").filter((c) => c.checked).map((c) => c.value).join(",");
-  if (!models) return launchMsg("select at least one embedding model", "error");
-  const params = {
-    pipeline: $("#f-pipeline").value,
-    mode: $("#f-mode").value,
-    models,
-    force: $("#f-force").checked,
-    save_models: $("#f-save-models").checked,
-    skip_projections: $("#f-skip-proj").checked,
-  };
-  const limit = parseInt($("#f-limit").value, 10);
-  if (limit > 0) params.limit = limit;
-  queueJob("run", params);
+// "Run all" ignores the advanced controls entirely: fixed, predictable defaults
+$("#b-run-all").addEventListener("click", () => {
+  if (!STATE) return;
+  if (!confirm("This runs all nine configurations with minilm on the full dataset, "
+      + "which can take hours. Continue?")) return;
+  const all = new Set();
+  for (const p of Object.keys(STATE.pipelines))
+    for (const m of STATE.modes) all.add(`${p}|${m}`);
+  launchSelected(all, { models: "minilm", force: false, save_models: true, skip_projections: false });
+  goStep(0);
 });
 
-$("#b-sweep").addEventListener("click", () => {
-  if (!confirm("Queue the FULL sweep: 3 pipelines × 3 modes, all selected embedding models. This can take many hours. Continue?")) return;
-  const models = $$(".f-model").filter((c) => c.checked).map((c) => c.value).join(",");
-  const params = {
-    force: $("#f-force").checked,
-    save_models: $("#f-save-models").checked,
-    skip_projections: $("#f-skip-proj").checked,
-  };
-  if (models) params.models = models;
-  const limit = parseInt($("#f-limit").value, 10);
-  if (limit > 0) params.limit = limit;
-  queueJob("sweep", params);
+$("#b-confirm-run").addEventListener("click", () => {
+  const p = runParams();
+  if (!p.models) return launchMsg("Pick at least one embedding under More settings.", "error");
+  if (!p.limit && !confirm("This runs on the full dataset and can take hours. Continue?")) return;
+  launchSelected(SELECTED, p);
+  goStep(0);
 });
 
-/* -------- jobs table + log -------- */
+$("#f-smoke").addEventListener("change", () => $("#f-limit").disabled = !$("#f-smoke").checked);
+$("#f-limit").disabled = true;
+
+$("#b-show-analysis").addEventListener("click", () =>
+  $$(".tab-btn").find((b) => b.dataset.tab === "results").click());
+
+/* -------- activity strip -------- */
+const jobLabel = (j) =>
+  j.stage === "sweep" ? "all 9 runs" :
+  j.stage === "dataset" ? `dataset: ${j.params.which}` :
+  j.stage === "run" ? `${pShort(j.params.pipeline)} / ${MODE_SHORT[j.params.mode]}` : j.stage;
+
+/* Job times arrive as epoch seconds. Rows carry a short local stamp with the
+   full date-time on hover, so "when did this run?" survives a page reload. */
+const stampOf = (t) => new Date(t * 1000).toLocaleString([],
+  { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const clockOf = (t) => new Date(t * 1000).toLocaleTimeString([],
+  { hour: "2-digit", minute: "2-digit" });
+
 async function refreshJobs() {
   let data;
   try { data = await fetchJSON("/api/jobs"); } catch { return; }
   const jobs = data.jobs;
-  const busy = jobs.some((j) => j.status === "running" || j.status === "queued");
-  const pill = $("#queue-pill");
-  pill.textContent = busy ? `${jobs.filter((j) => j.status === "running").length} running / ${jobs.filter((j) => j.status === "queued").length} queued` : "idle";
-  pill.classList.toggle("busy", busy);
+  const running = jobs.find((j) => j.status === "running");
+  const queued = jobs.filter((j) => j.status === "queued").length;
 
-  if (!jobs.length) {
-    $("#jobs-table").innerHTML = `<tr><td class="muted">No jobs yet — queue one above.</td></tr>`;
-    return;
+  const pill = $("#queue-pill");
+  pill.textContent = running ? `running${queued ? ` · ${queued} queued` : ""}` : "idle";
+  pill.classList.toggle("busy", !!running || queued > 0);
+
+  // the queue runs one job at a time, so "what is running" is a single line
+  $("#activity-line").innerHTML = running
+    ? `<span class="spinner"></span><b>${esc(jobLabel(running))}</b>
+       <span class="muted">since ${esc(clockOf(running.started))}, ${Math.round(Date.now() / 1000 - running.started)}s${queued ? `, ${queued} queued` : ""}</span>
+       <button class="btn small danger" data-cancel="${running.id}">cancel</button>`
+    : `<span class="muted">${jobs.length ? "Nothing running." : "Nothing has run yet. Press Run to start one."}</span>`;
+
+  $("#activity-recent").innerHTML = jobs.filter((j) => j.status !== "running").slice(0, 5)
+    .map((j) => {
+      const dur = j.started && j.finished ? `${Math.round(j.finished - j.started)}s` : "";
+      const at = j.finished || j.started || j.created;
+      return `<div class="act-row"><span class="status ${j.status}">${j.status}</span>
+        <span class="act-what">${esc(jobLabel(j))}</span>
+        <time class="act-time" title="${esc(new Date(at * 1000).toLocaleString())}">${esc(stampOf(at))}</time>
+        <span class="act-dur">${dur}</span></div>`;
+    }).join("");
+
+  // the log belongs to the newest job, so date the disclosure with its start
+  const latest = jobs[0];
+  if (latest) {
+    $("#log-sum").innerHTML = `Log <span class="muted">${esc(stampOf(latest.created))}</span>`;
   }
-  const rows = jobs.map((j) => {
-    const dur = j.started ? Math.round(((j.finished || Date.now() / 1000) - j.started)) : 0;
-    const what = j.stage === "run" ? `${pShort(j.params.pipeline)} / ${MODE_SHORT[j.params.mode]}` :
-                 j.stage === "sweep" ? "full sweep" :
-                 j.stage === "dataset" ? `dataset: ${j.params.which}` : j.stage;
-    const extra = [j.params.models, j.params.limit ? `limit=${j.params.limit}` : ""].filter(Boolean).join(" · ");
-    const cancel = (j.status === "running" || j.status === "queued")
-      ? `<button class="btn small danger" data-cancel="${j.id}">cancel</button>` : "";
-    return `<tr>
-      <td class="muted">${j.id}</td><td>${esc(what)}</td><td class="muted">${esc(extra)}</td>
-      <td><span class="status ${j.status}">${j.status}</span></td>
-      <td class="num">${dur ? dur + "s" : ""}</td>
-      <td><button class="btn small" data-log="${j.id}">log</button> ${cancel}</td>
-    </tr>`;
-  }).join("");
-  $("#jobs-table").innerHTML = `<tr><th>id</th><th>Job</th><th></th><th>Status</th><th class="num">Time</th><th></th></tr>${rows}`;
 
   $$("[data-cancel]").forEach((b) => b.addEventListener("click", async () => {
     try { await fetchJSON(`/api/jobs/${b.dataset.cancel}/cancel`, { method: "POST" }); } catch {}
     refreshJobs();
   }));
-  $$("[data-log]").forEach((b) => b.addEventListener("click", () => {
-    if (openLogJob === b.dataset.log) { openLogJob = null; $("#job-log").style.display = "none"; return; }
-    openLogJob = b.dataset.log;
+
+  // one log, always the newest job — no per-row log buttons to hunt through
+  const newest = jobs[0];
+  $("#log-wrap").hidden = !newest;
+  if (newest && newest.id !== openLogJob) {
+    openLogJob = newest.id;
     logOffset = 0;
+    LOG_TEXT = "";
     $("#job-log").textContent = "";
-    $("#job-log").style.display = "block";
-    pollLog();
-  }));
+  }
+
+  renderProgress(running);
+  if (newest && newest.status === "done" && newest.id !== PREVIEW_FOR) {
+    PREVIEW_FOR = newest.id;
+    loadPreview();
+  }
+}
+
+/* ponytail: progress is a STEP COUNT scraped from markers the pipeline already
+   prints — ">>> label" per step in a sweep, "$ cmd" per step otherwise. Nothing
+   in the job API reports a percentage, so the bar moves in whole steps and the
+   estimate is a linear extrapolation. Replace both the moment a job exposes
+   real progress. */
+const fmtDur = (s) => (s >= 3600 ? `${Math.round(s / 360) / 10}h`
+  : s >= 60 ? `${Math.round(s / 60)}m` : `${s}s`);
+
+function renderProgress(job) {
+  const box = $("#prog");
+  if (!job) { box.hidden = true; return; }
+  const total = job.stage === "sweep" ? 18 : ((job.cmds || []).length || 2);
+  const started = (LOG_TEXT.match(job.stage === "sweep" ? /^>>> /gm : /^\$ /gm) || []).length;
+  const done = Math.max(0, Math.min(total, started - 1));   // a marker means STARTED
+  const frac = total ? done / total : 0;
+  const elapsed = Math.max(0, Date.now() / 1000 - job.started);
+  const left = frac > 0.02 ? Math.round(elapsed * (1 - frac) / frac) : null;
+  box.hidden = false;
+  $("#prog-fill").style.width = `${Math.round(frac * 100)}%`;
+  $("#prog-txt").textContent = `${done}/${total}` + (left ? ` · ~${fmtDur(left)} left` : "");
+}
+
+async function loadPreview() {
+  let rows;
+  try { rows = (await fetchJSON("/api/results")).rows; } catch { return; }
+  const best = rows.filter((r) => LAST_RUN_KEYS.has(`${r.Pipeline}|${r.Mode}`))
+    .sort((a, b) => (b["ROC-AUC"] ?? 0) - (a["ROC-AUC"] ?? 0)).slice(0, 6);
+  if (!best.length) return;
+  $("#preview-table").innerHTML =
+    `<tr><th>Run</th><th>Emb</th><th>Classifier</th><th class="num">ROC-AUC</th><th class="num">F1</th></tr>`
+    + best.map((r) => `<tr><td>${pShort(r.Pipeline)}/${MODE_SHORT[r.Mode]}</td>
+        <td>${esc(r.Embeddings)}</td><td>${esc(r.Classifier)}</td>
+        <td class="num">${fmt(r["ROC-AUC"])}</td><td class="num">${fmt(r["F1-Score"])}</td></tr>`).join("");
+  $("#results-preview").hidden = false;
 }
 
 async function pollLog() {
@@ -243,6 +384,7 @@ async function pollLog() {
       const el = $("#job-log");
       const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
       el.textContent += data.text;
+      LOG_TEXT += data.text;
       logOffset = data.offset;
       if (stick) el.scrollTop = el.scrollHeight;
     }
@@ -567,17 +709,21 @@ async function loadDetectOptions() {
   try { opts = await fetchJSON("/api/detect/options"); } catch { opts = {}; }
   DETECT_OPTIONS = opts.models || [];
   const msg = $("#detect-msg");
+  // this is the landing tab, so the empty state stays one short line; the
+  // Instructions card below already spells out how to produce models
   if (!DETECT_OPTIONS.length) {
-    msg.textContent = opts.reason
-      ? `${opts.reason}. ${opts.fix}.`
-      : "No saved models found — queue a run with “save models” checked (Run tab), then come back.";
+    msg.textContent = "No trained classifiers yet — run one from the Run tab.";
     msg.className = "d-note msg warn";
     $("#b-detect").disabled = true;
     $("#b-sample").disabled = true;
+    $("#d-emb").hidden = true;
+    $("#d-clf").hidden = true;
     return;
   }
   $("#b-detect").disabled = false;
   $("#b-sample").disabled = false;
+  $("#d-emb").hidden = false;
+  $("#d-clf").hidden = false;
   msg.textContent = "";
   DETECT_RUN = DETECT_OPTIONS.find(
     (m) => m.pipeline === DETECT_PIN.pipeline && m.mode === DETECT_PIN.mode) || DETECT_OPTIONS[0];
@@ -731,6 +877,9 @@ $("#pk-pipeline").addEventListener("change", loadPeek);
 $("#pk-n").addEventListener("change", loadPeek);
 
 /* ================= boot & polling ================= */
+/* Simulation is the landing tab, so its model list must load at boot: the
+   tab-click handler that fills it never fires for the tab you arrive on. */
+loadDetectOptions();
 refreshState();
 refreshJobs();
 setInterval(() => {

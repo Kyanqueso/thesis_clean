@@ -24,6 +24,9 @@
 }
 
 * { box-sizing: border-box; }
+/* an author display rule (flex/grid) outranks the UA's [hidden] rule, so
+   hiding via el.hidden silently fails without this */
+[hidden] { display: none !important; }
 body {
   margin: 0; background: var(--page); color: var(--text);
   font: 14px/1.45 var(--sans);
@@ -174,6 +177,162 @@ table.plain th { cursor: default; }
 /* figures/previews are white-background PNGs — matted, not inverted, to stay legible */
 .figures figcaption { font-size: 11px; color: var(--muted); font-family: var(--mono); margin-top: 3px; }
 
+/* ---------------- run tab ---------------- */
+/* Simple path first: one button and two knobs. Anything slow, costly or
+   destructive lives behind Advanced so it cannot be hit by accident. */
+.hero { text-align: center; padding: 34px 28px 26px; }
+.btn-hero {
+  font: inherit; font-weight: 700; font-size: 20px; cursor: pointer;
+  padding: 18px 62px; border-radius: 999px; letter-spacing: 0.01em;
+  border: 1px solid var(--accent); background: var(--accent); color: #fff;
+}
+.btn-hero:hover { filter: brightness(1.1); }
+
+/* ---- run wizard ---- */
+/* one card, one step visible; the [hidden] reset above does the switching */
+.wiz-dots { display: flex; gap: 6px; justify-content: center; margin-bottom: 22px; }
+.wiz-dots i { width: 22px; height: 3px; border-radius: 2px; background: var(--grid); }
+.wiz-dots i.on { background: var(--accent); }
+.wiz-title { font-size: 21px; font-weight: 600; color: var(--text); margin: 0 0 6px; }
+.wiz-sub {
+  font-size: 13px; color: var(--muted); line-height: 1.5;
+  margin: 0 auto 22px; max-width: 52ch;
+}
+
+.choices { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+.choice {
+  font: inherit; cursor: pointer; display: flex; flex-direction: column; gap: 6px;
+  width: 268px; padding: 26px 28px; border-radius: 14px; text-align: left;
+  background: var(--card2); color: var(--text); border: 1px solid var(--border);
+}
+.choice:hover { border-color: var(--accent); background: var(--accent-soft); }
+.choice b { font-size: 18px; font-weight: 650; }
+.choice small { font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+.linkback {
+  font: inherit; font-size: 12.5px; cursor: pointer; background: none;
+  border: none; color: var(--muted); padding: 4px 0;
+}
+.linkback:hover { color: var(--accent); }
+.linkback::before { content: "← "; }
+.step-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; margin-top: 24px;
+}
+.step-nav.one { justify-content: center; }
+.step-nav .btn { font-size: 14px; padding: 10px 24px; }
+
+/* the smoke test earns its own row: it changes WHERE results are written,
+   not just how long the run takes */
+.smoke {
+  display: inline-flex; align-items: center; gap: 10px; margin-top: 22px;
+  font-size: 13.5px; color: var(--ink-2); cursor: pointer;
+}
+.smoke input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
+.smoke-txt input {
+  font: inherit; font-size: 13px; width: 74px; text-align: center; margin: 0 2px;
+  color: var(--text); background: var(--card2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px;
+}
+.smoke-txt input:disabled { opacity: 0.4; }
+.seed-field { max-width: 120px; }
+
+.rev-list { display: inline-flex; flex-direction: column; gap: 5px; margin: 6px 0 20px; }
+.rev-row { display: flex; gap: 14px; font-size: 14px; text-align: left; }
+.rev-row b { min-width: 30px; }
+.rev-row span { color: var(--ink-2); }
+.rev-meta {
+  display: flex; justify-content: center; flex-wrap: wrap; gap: 28px;
+  margin: 0; font-size: 13px;
+}
+.rev-meta dt { color: var(--muted); font-size: 11.5px; margin-bottom: 2px; }
+.rev-meta dd { margin: 0; color: var(--ink-2); }
+
+.adv-row { display: flex; gap: 14px; }
+.adv-row .field input { width: 110px; }
+
+/* progress: a step count, so it moves in visible jumps rather than creeping */
+.prog { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.prog-bar { flex: 1; height: 6px; background: var(--grid); border-radius: 999px; overflow: hidden; }
+.prog-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.4s; }
+.prog-txt {
+  font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
+  min-width: 122px; text-align: right;
+}
+#results-preview .btn { margin-top: 12px; }
+
+details.adv { margin-top: 18px; }
+details.adv > summary {
+  cursor: pointer; list-style: none; font-size: 11px; color: var(--muted);
+  font-weight: 650; text-transform: uppercase; letter-spacing: 0.05em;
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 0;
+}
+details.adv > summary::-webkit-details-marker { display: none; }
+details.adv > summary::before { content: "▸"; }
+details.adv[open] > summary::before { content: "▾"; }
+.adv-body {
+  display: flex; flex-direction: column; gap: 12px; margin-top: 8px; padding: 14px 16px;
+  text-align: left; background: var(--card2);
+  border: 1px solid var(--border); border-radius: 9px;
+}
+.adv-body .field { margin: 0; }
+.hero .msg { display: block; margin-top: 12px; }
+
+/* The grid is the picker and the one place this page spends its boldness.
+   Each cell carries two facts: picked for this run (the box) and whether
+   results already exist (the check). */
+.mgrid { display: grid; grid-template-columns: minmax(168px, 1.2fr) repeat(3, 1fr); gap: 10px; }
+.mhead { align-self: end; padding: 4px; }
+.mhead-btn {
+  font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  background: none; border: none; color: var(--muted); padding: 4px;
+}
+.mhead-btn:hover { color: var(--accent); }
+.mname {
+  font: inherit; cursor: pointer; text-align: left; background: none; border: none;
+  display: flex; flex-direction: column; justify-content: center; gap: 3px; padding: 4px 2px;
+}
+.mname b { font-size: 15px; color: var(--text); }
+.mname:hover b { color: var(--accent); }
+.mname-full { font-size: 11.5px; color: var(--muted); line-height: 1.35; }
+
+.mcell {
+  font: inherit; cursor: pointer; display: flex;
+  align-items: center; justify-content: center;
+  min-height: 72px; border-radius: 12px;
+  background: var(--card2); color: var(--ink-2); border: 1px solid var(--border);
+  transition: border-color 0.12s, background 0.12s, opacity 0.12s;
+}
+.mcell:hover:not(:disabled) { border-color: var(--accent); }
+.mcell.on { border-color: var(--accent); background: var(--accent-soft); }
+.mcell:not(.on) { opacity: 0.4; }
+/* dataset missing: cannot run, but any delivered results are still true */
+.mcell.locked { border-style: dashed; cursor: not-allowed; }
+.mcell-mark { font-size: 20px; font-weight: 600; color: var(--ok-text); }
+
+/* activity */
+.act-line { display: flex; align-items: center; gap: 10px; font-size: 13px; min-height: 28px; }
+.act-row {
+  display: flex; gap: 12px; align-items: baseline; font-size: 12.5px;
+  padding: 4px 0; border-bottom: 1px solid var(--grid);
+}
+.act-row .status { min-width: 68px; }
+.act-what { flex: 1; min-width: 0; }
+.act-time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.act-dur { font-size: 12px; color: var(--muted); min-width: 44px; text-align: right; }
+.spinner {
+  width: 11px; height: 11px; border-radius: 50%; flex: none;
+  border: 2px solid var(--grid); border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+#log-wrap > summary { cursor: pointer; font-size: 12px; color: var(--muted); margin-top: 12px; }
+@media (max-width: 720px) {
+  .mgrid { grid-template-columns: minmax(104px, 1fr) repeat(3, 1fr); gap: 6px; }
+  .mcell { min-height: 58px; }
+  .mcell-mark { font-size: 16px; }
+  .choice { width: 100%; }
+}
+
 /* ---------------- detect ---------------- */
 /* One centred column: two inputs, one button. The button IS the verdict —
    no separate badge, gauge or result panel to keep in sync. */
@@ -208,7 +367,9 @@ table.plain th { cursor: default; }
   padding: 18px; border-radius: 999px; letter-spacing: 0.03em;
   border: 1px solid var(--accent); background: var(--accent); color: #fff;
 }
-.detect-btn:disabled { cursor: not-allowed; }
+/* .detect-btn is not a .btn, so it misses the global :disabled rule — without
+   this a dead button renders as an inviting primary one */
+.detect-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .detect-btn.loading { background: var(--card2); border-color: var(--border); color: var(--ink-2); }
 .detect-btn.malicious { background: var(--bad); border-color: var(--bad); }
 .detect-btn.benign { background: var(--ok); border-color: var(--ok); }
