@@ -86,8 +86,29 @@ async function refreshState() {
       for (const m of STATE.modes) SELECTED.add(`${p}|${m}`);
     }
   }
+  renderStartup();
   renderCapabilities();
   renderMatrix();
+}
+
+/* Three lines above the hero button: what has to be on disk before a run means
+   anything. Counts come from the same /api/state the matrix reads, so the two
+   can never disagree about what is there. */
+function renderStartup() {
+  if (!STATE) return;
+  const ds = Object.values(STATE.datasets);
+  const nData = ds.filter((x) => x.info).length;
+  const nEmb = STATE.runs.filter((r) => Object.values(r.embeddings).some(Boolean)).length;
+  const files = `<button class="tablink" data-goto="files">files</button>`;
+  $("#startup").innerHTML = [
+    `Add the dataset (${nData}/${ds.length}). Check ${files}.`,
+    `Add embeddings (${nEmb}/${STATE.runs.length}). Check ${files}.`,
+    "Press <b>Run</b> and pick what to train.",
+  ].map((t) => `<li>${t}</li>`).join("");
+  // click the real tab button rather than duplicating the switch logic, so this
+  // cannot drift from however tabs actually work
+  $$("#startup .tablink").forEach((b) => b.addEventListener("click",
+    () => $(`.tab-btn[data-tab="${b.dataset.goto}"]`).click()));
 }
 
 // delivered artifacts carry results + figures but no models or per-sample

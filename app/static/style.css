@@ -182,11 +182,29 @@ table.plain th { cursor: default; }
    destructive lives behind Advanced so it cannot be hit by accident. */
 .hero { text-align: center; padding: 34px 28px 26px; }
 .btn-hero {
-  font: inherit; font-weight: 700; font-size: 20px; cursor: pointer;
-  padding: 18px 62px; border-radius: 999px; letter-spacing: 0.01em;
+  font: inherit; font-weight: 700; font-size: 25px; cursor: pointer;
+  padding: 23px 88px; border-radius: 999px;
+  /* uppercase via CSS, not in the markup: the accessible name stays "Run",
+     and caps want more tracking than the 0.01em mixed-case had */
+  text-transform: uppercase; letter-spacing: 0.07em;
   border: 1px solid var(--accent); background: var(--accent); color: #fff;
 }
 .btn-hero:hover { filter: brightness(1.1); }
+
+/* instructions above the hero button: a real sequence, so plain decimal
+   markers carry the order and nothing else decorates them */
+/* the block hugs its content and centres as a unit: the lines stay left-aligned
+   so the decimal markers align, but the group sits under the Run button */
+.startup { width: fit-content; max-width: 48ch; margin: 0 auto 30px; text-align: left; }
+.startup-h { font-size: 14px; font-weight: 600; color: var(--text); margin: 0 0 10px; text-align: center; }
+.startup ol { margin: 0; padding-left: 1.5em; display: flex; flex-direction: column; gap: 7px; }
+.startup li { font-size: 13.5px; color: var(--ink-2); line-height: 1.5; }
+.startup li::marker { color: var(--muted); }
+.tablink {
+  font: inherit; cursor: pointer; background: none; border: none; padding: 0;
+  color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
+}
+.tablink:hover { filter: brightness(1.25); }
 
 /* ---- run wizard ---- */
 /* one card, one step visible; the [hidden] reset above does the switching */
