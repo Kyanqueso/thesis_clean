@@ -18,14 +18,12 @@ Thumbs.db
 
 # Data files is large.
 data/
-data_from_vastai/
 
 # Generated embeddings also too large
 embeddings/
 
 # Per-pipeline / per-ablation-mode run outputs (very large)
 runs/
-runs_from_vastai/
 
 # API Keys and secrets
 .env
@@ -41,3 +39,4 @@ Thesis Artifacts/
 
 # browser-automation scratch output
 .playwright-mcp/
+vastai/
