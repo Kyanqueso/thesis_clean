@@ -111,9 +111,16 @@ def inspect_file(path: str):
                     break
                 lines.append(line[:600].rstrip())
         return {"type": "text", "text": "\n".join(lines) + "\n… (first 3 rows)"}
-    if suf in (".json", ".csv", ".log", ".txt", ".html"):
+    if suf == ".csv":
+        import json
+        import pandas as pd
+        df = pd.read_csv(p, nrows=10)
+        data = json.loads(df.to_json(orient="split"))  # numpy scalars are not JSON
+        return {"type": "table", "cols": data["columns"], "rows": data["data"],
+                "note": f"first {len(df)} rows"}
+    if suf in (".json", ".log", ".txt", ".md", ".html"):
         text = p.read_text(encoding="utf-8", errors="replace")
-        cap = 20000
+        cap = 4000  # a peek, not a viewer
         return {"type": "text", "text": text[:cap] + ("\n… (truncated)" if len(text) > cap else "")}
     if suf == ".png":
         return {"type": "image"}

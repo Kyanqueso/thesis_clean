@@ -398,16 +398,72 @@ details.adv[open] > summary::before { content: "▾"; }
 #detect-help code { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
 
 /* ---------------- files tab ---------------- */
+/* ---------------- files tab ---------------- */
+/* Two nesting levels: kind (.file-section) > pipeline (.file-sub) > rows.
+   The inner level drops its border so the tree reads by indent, not by boxes. */
 .file-section { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--card); }
-.file-section summary {
+.file-section > summary, .file-sub > summary {
   cursor: pointer; padding: 8px 12px; font-size: 13px; font-weight: 600;
   display: flex; align-items: center; gap: 10px; list-style: none; user-select: none;
 }
-.file-section summary::before { content: "▸ "; color: var(--muted); }
-.file-section[open] summary::before { content: "▾ "; }
-.file-section summary::-webkit-details-marker { display: none; }
+.file-section > summary::before, .file-sub > summary::before { content: "▸"; color: var(--muted); }
+.file-section[open] > summary::before, .file-sub[open] > summary::before { content: "▾"; }
+summary::-webkit-details-marker { display: none; }
+.file-sub > summary:hover, .file-section > summary:hover { background: var(--card2); }
+.file-section > .file-body { padding: 0 0 6px 10px; }
+.file-sub > summary { font-weight: 500; color: var(--ink-2); }
+.file-sub > .file-body { padding-left: 18px; }
 .file-section table { margin: 0 0 4px; }
-tr.file-missing td { color: var(--muted); opacity: 0.6; }
+.empty { padding: 4px 12px 8px; font-size: 12px; }
+
+/* status dot instead of a "present"/"missing" word in every row */
+.dot-cell { width: 18px; }
+.dot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  border: 1px solid var(--muted);
+}
+.dot.on { background: var(--ok); border-color: var(--ok); }
+tr.file-missing td { color: var(--muted); opacity: 0.55; }
+table.files tr[data-view] { cursor: pointer; }
+table.files tr[data-view]:hover td { background: var(--card2); color: var(--text); }
+
+/* eye affordance: dim until the row is hovered, so 50 rows do not shout */
+.eye-cell { width: 28px; text-align: right; }
+.eye {
+  background: none; border: none; padding: 2px; color: var(--muted);
+  cursor: pointer; opacity: 0; transition: opacity 0.1s; vertical-align: -3px;
+}
+table.files tr:hover .eye, .eye:focus-visible { opacity: 1; }
+.eye:hover { color: var(--accent); }
+
+/* ---------------- peek dialog ---------------- */
+#peek-dlg {
+  width: min(880px, 92vw); max-height: 82vh; padding: 0; overflow: hidden;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--card); color: var(--text); font: inherit;
+  display: flex; flex-direction: column;
+}
+#peek-dlg:not([open]) { display: none; }
+#peek-dlg::backdrop { background: rgba(0, 0, 0, 0.62); }
+#peek-dlg header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+}
+#peek-path {
+  margin: 0; font: 12px/1.4 var(--mono); color: var(--ink-2);
+  overflow-wrap: anywhere; flex: 1;
+}
+#peek-close { margin: 0; font-size: 14px; }
+#peek-body { padding: 12px 16px 16px; overflow: auto; }
+#peek-body .log { max-height: none; margin: 0; }
+#peek-body table { font-size: 12px; }
+
+/* text-weight button that lives inside a <summary> without looking like a control */
+.ghost {
+  margin-left: auto; background: none; border: none; color: var(--muted);
+  font: inherit; font-size: 11px; font-weight: 400; cursor: pointer; padding: 2px 4px;
+}
+.ghost:hover { color: var(--accent); }
 .mono { font-family: var(--mono); font-size: 12px; }
 .preview-img { max-width: 100%; border-radius: 7px; border: 1px solid var(--border); background: #fff; }
 

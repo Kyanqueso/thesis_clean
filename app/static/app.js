@@ -803,60 +803,135 @@ $("#b-detect").addEventListener("click", async () => {
 }));
 
 /* ================= files tab ================= */
-const openSections = new Set();
+/* Artifacts grouped by kind then pipeline (see runs.file_tree). Missing files
+   are hidden by default — the count in the summary already says how many — and
+   a per-group toggle brings them back when you need the expected filenames. */
+const openSections = new Set();  // node keys the user expanded
+const showMissing = new Set();   // group names whose missing rows are revealed
 
+const EYE = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+  stroke-width="2" stroke-linecap="round" aria-hidden="true"><path
+  d="M1.5 12S5 5.5 12 5.5 22.5 12 22.5 12 19 18.5 12 18.5 1.5 12 1.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>`;
+
+const fmtSize = (b) => (b == null ? ""
+  : b < 1e3 ? `${b} B` : b < 1e6 ? `${(b / 1e3).toFixed(0)} KB` : `${(b / 1e6).toFixed(1)} MB`);
+const nodeCount = (n) => (n.n_expected ? `${n.n_present}/${n.n_expected}` : `${n.n_files} files`);
+const nodeCls = (n) => (n.n_expected
+  ? (n.n_present === n.n_expected ? "on" : n.n_present ? "part" : "")
+  : (n.n_files ? "on" : ""));
+
+function fileRow(e) {
+  const name = e.mode ? `${MODE_SHORT[e.mode] || e.mode} / ${e.label}` : e.label;
+  const when = e.mtime
+    ? new Date(e.mtime * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
+  const extra = e.kind === "unexpected" ? ` <span class="badge part">extra</span>` : "";
+  const click = e.preview ? ` data-view="${esc(e.path)}"` : "";
+  const eye = e.preview
+    ? `<button class="eye" tabindex="-1" aria-label="Preview ${esc(e.label)}">${EYE}</button>` : "";
+  return `<tr class="file-${e.status}"${click} title="${esc(e.path)}">
+    <td class="dot-cell"><i class="dot ${e.status === "present" ? "on" : ""}"
+      aria-label="${e.status}"></i></td>
+    <td class="mono">${esc(name)}${extra}</td>
+    <td class="num">${fmtSize(e.size)}</td>
+    <td class="muted">${when}</td>
+    <td class="eye-cell">${eye}</td></tr>`;
+}
+
+function fileTable(entries, show) {
+  const rows = entries.filter((e) => show || e.status === "present");
+  if (!rows.length) return `<p class="empty muted">nothing here yet</p>`;
+  return `<div class="scroll"><table class="plain files">${rows.map(fileRow).join("")}</table></div>`;
+}
+
+function fileNode(node, key, show, cls) {
+  const body = node.children.length
+    ? node.children.map((c) => fileNode(c, `${key}/${c.name}`, show, "file-sub")).join("")
+    : fileTable(node.entries, show);
+  const nMissing = node.n_expected - node.n_present;
+  const toggle = cls === "file-section" && nMissing
+    ? `<button class="ghost" data-missing="${esc(node.name)}">${show ? "hide" : "show"} ${nMissing} missing</button>`
+    : "";
+  return `<details class="${cls}" data-key="${esc(key)}" ${openSections.has(key) ? "open" : ""}>
+    <summary>${esc(node.name)}
+      <span class="badge ${nodeCls(node)}">${nodeCount(node)}</span>${toggle}</summary>
+    <div class="file-body">${body}</div></details>`;
+}
+
+let FILES_SIG = "";   // last payload rendered; the tab re-polls every 5s
+let FILES_DATA = null;
+
+/* Re-render only when the tree actually changed. Replacing innerHTML on a timer
+   drops hover state and can detach a row mid-click. */
 async function loadFiles() {
   let data;
   try { data = await fetchJSON("/api/files"); }
   catch (e) { $("#files-list").innerHTML = `<span class="msg error">${esc(e.message)}</span>`; return; }
-
-  $("#files-list").innerHTML = data.sections.map((s) => {
-    const anyPresent = s.entries.some((e) => e.status === "present");
-    const isOpen = openSections.size ? openSections.has(s.name) : anyPresent;
-    const cls = s.n_expected && s.n_present === s.n_expected ? "on" : s.n_present ? "part" : "";
-    const count = s.n_expected ? `${s.n_present}/${s.n_expected} expected` : `${s.entries.length} files`;
-    const nExtra = s.entries.filter((e) => e.kind === "unexpected").length;
-    const rows = s.entries.map((e) => {
-      const status = e.status === "present"
-        ? `<span class="badge on">present</span>` : `<span class="badge">missing</span>`;
-      const tag = e.kind === "unexpected" ? ` <span class="badge part">unexpected</span>`
-        : e.kind === "optional" ? ` <span class="badge">output</span>` : "";
-      const when = e.mtime ? new Date(e.mtime * 1000).toLocaleString() : "";
-      const view = e.status === "present"
-        ? `<button class="btn small" data-view="${esc(e.path)}">view</button>` : "";
-      return `<tr class="file-${e.status}"><td>${status}${tag}</td>
-        <td class="mono">${esc(e.path)}</td>
-        <td class="num">${e.size_mb != null ? e.size_mb + " MB" : ""}</td>
-        <td class="muted">${when}</td><td>${view}</td></tr>`;
-    }).join("");
-    return `<details class="file-section" data-name="${esc(s.name)}" ${isOpen ? "open" : ""}>
-      <summary>${esc(s.name)} <span class="badge ${cls}">${count}</span>
-        ${nExtra ? `<span class="badge part">${nExtra} unexpected</span>` : ""}</summary>
-      <div class="scroll"><table class="plain">${rows}</table></div>
-    </details>`;
-  }).join("");
-
-  $$(".file-section").forEach((d) => d.addEventListener("toggle", () => {
-    if (d.open) openSections.add(d.dataset.name); else openSections.delete(d.dataset.name);
-  }));
-  $$("#files-list [data-view]").forEach((b) => b.addEventListener("click", () => previewFile(b.dataset.view)));
+  const sig = JSON.stringify(data);
+  if (sig === FILES_SIG) return;
+  FILES_SIG = sig;
+  FILES_DATA = data;
+  renderFiles();
 }
+
+function renderFiles() {
+  $("#files-list").innerHTML = FILES_DATA.groups
+    .map((g) => fileNode(g, g.name, showMissing.has(g.name), "file-section")).join("");
+
+  $$("#files-list details").forEach((d) => d.addEventListener("toggle", () => {
+    if (d.open) openSections.add(d.dataset.key); else openSections.delete(d.dataset.key);
+  }));
+  /* the toggle lives inside <summary>, whose default action is open/close */
+  $$("#files-list [data-missing]").forEach((b) => b.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const g = b.dataset.missing;
+    if (showMissing.has(g)) showMissing.delete(g); else showMissing.add(g);
+    renderFiles();
+  }));
+  $$("#files-list tr[data-view]").forEach((r) =>
+    r.addEventListener("click", () => previewFile(r.dataset.view)));
+}
+
+/* metrics want 4 decimals; counts like Test-Samples must not become 14000.0000 */
+const cell = (v) => (typeof v !== "number" ? v ?? ""
+  : Number.isInteger(v) ? v : fmt(v, 4));
+
+function previewBody(info) {
+  if (info.type === "image") {
+    return `<img class="preview-img" src="/api/file/raw?path=${encodeURIComponent(PEEK_PATH)}">`;
+  }
+  if (info.type === "table") {
+    const head = `<tr>${info.cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr>`;
+    const body = info.rows.map((r) =>
+      `<tr>${r.map((v) => `<td>${esc(cell(v))}</td>`).join("")}</tr>`).join("");
+    return `<div class="scroll"><table class="plain">${head}${body}</table></div>
+      <p class="note muted">${esc(info.note || "")}</p>`;
+  }
+  return `<pre class="log">${esc(info.text)}</pre>`;
+}
+
+let PEEK_PATH = null;
 
 async function previewFile(path) {
-  const card = $("#file-preview-card");
-  card.style.display = "";
-  $("#file-preview-title").textContent = path;
-  $("#file-preview").innerHTML = `<span class="muted">loading…</span>`;
+  const dlg = $("#peek-dlg");
+  PEEK_PATH = path;
+  $("#peek-path").textContent = path;
+  $("#peek-body").innerHTML = `<span class="muted">loading…</span>`;
+  if (!dlg.open) dlg.showModal();
   try {
     const info = await fetchJSON(`/api/file/inspect?path=${encodeURIComponent(path)}`);
-    $("#file-preview").innerHTML = info.type === "image"
-      ? `<img class="preview-img" src="/api/file/raw?path=${encodeURIComponent(path)}">`
-      : `<pre class="log">${esc(info.text)}</pre>`;
+    if (PEEK_PATH !== path) return;  // a newer peek won the race
+    $("#peek-body").innerHTML = previewBody(info);
   } catch (e) {
-    $("#file-preview").innerHTML = `<span class="msg error">${esc(e.message)}</span>`;
+    $("#peek-body").innerHTML = `<span class="msg error">${esc(e.message)}</span>`;
   }
-  card.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
+
+$("#peek-close").addEventListener("click", () => $("#peek-dlg").close());
+/* clicking the backdrop lands on the dialog itself, never on its children */
+$("#peek-dlg").addEventListener("click", (ev) => {
+  if (ev.target === $("#peek-dlg")) $("#peek-dlg").close();
+});
 
 /* ================= dataset peek (files tab) ================= */
 function fillPeekSelect() {

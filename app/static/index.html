@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>thesis_clean dashboard</title>
-<link rel="stylesheet" href="/static/style.css?v=25">
+<link rel="stylesheet" href="/static/style.css?v=27">
 </head>
 <body>
 <header>
@@ -223,11 +223,12 @@
 <!-- ============ FILES TAB ============ -->
 <section class="tab" id="tab-files">
   <div class="card">
-    <h2>Artifact explorer <span class="muted">— every file the pipeline schema expects, present or missing, plus anything extra found on disk</span></h2>
+    <h2>Files</h2>
+    <p class="note muted">Input datasets and embeddings must be completed before running the classifiers.</p>
     <div id="files-list"><span class="muted">Loading…</span></div>
   </div>
   <div class="card" id="peek-card">
-    <h2>Dataset peek <span class="muted">— random labeled rows straight from the jsonl files</span></h2>
+    <h2>Dataset peek</h2>
     <div class="row wrap gap">
       <label class="field"><span>Dataset</span><select id="pk-pipeline"></select></label>
       <label class="field"><span>Rows</span><select id="pk-n">
@@ -239,13 +240,18 @@
     <div class="scroll"><table id="peek-table"></table></div>
   </div>
 
-  <div class="card" id="file-preview-card" style="display:none">
-    <h2 id="file-preview-title" style="font-family:var(--mono)"></h2>
-    <div id="file-preview"></div>
-  </div>
 </section>
 </main>
 
-<script src="/static/app.js?v=19"></script>
+<!-- quick peek at one artifact; <dialog> brings its own backdrop + Esc-to-close -->
+<dialog id="peek-dlg">
+  <header>
+    <h3 id="peek-path"></h3>
+    <button class="ghost" id="peek-close" aria-label="Close preview">&#10005;</button>
+  </header>
+  <div id="peek-body"></div>
+</dialog>
+
+<script src="/static/app.js?v=25"></script>
 </body>
 </html>

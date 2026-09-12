@@ -51,7 +51,8 @@ def _file_info(p: Path) -> dict | None:
     if not p.is_file():
         return None
     st = p.stat()
-    return {"size_mb": round(st.st_size / 1e6, 2), "mtime": int(st.st_mtime)}
+    return {"size_mb": round(st.st_size / 1e6, 2), "size": st.st_size,
+            "mtime": int(st.st_mtime)}
 
 
 def scan_state() -> dict:
@@ -345,76 +346,126 @@ EXPECTED_RESULTS = ["full_evaluation_results.csv", "full_evaluation_results.html
                     "evaluation_summary.json", "predictions.npz", "run_meta.json"]
 
 
-def _tree_entry(rel: str, kind: str) -> dict:
+# What /api/file/inspect can actually show. Anything else answers with a size
+# line only, which is not a preview, so the UI offers no eye for it.
+PREVIEW_EXT = frozenset({".csv", ".json", ".jsonl", ".log", ".txt", ".md",
+                         ".html", ".npy", ".npz", ".png"})
+
+
+def _tree_entry(rel: str, kind: str, mode: str | None = None,
+                label: str | None = None) -> dict:
     target = paths.resolve(rel)
     info = _file_info(target) if target else None
     return {"path": rel, "kind": kind,  # expected | optional | unexpected
+            "label": label or rel.rsplit("/", 1)[-1],
+            "preview": bool(info) and Path(rel).suffix.lower() in PREVIEW_EXT,
+            "mode": mode,  # the UI prefixes the label with this when set
             "status": "present" if info else "missing",
-            "size_mb": info["size_mb"] if info else None,
+            "size": info["size"] if info else None,
             "mtime": info["mtime"] if info else None}
 
 
-def _listdir_extra(dirpath: Path, base: str, known: set[str], kind: str) -> list[dict]:
+def _listdir_extra(dirpath: Path, base: str, known: set[str], kind: str,
+                   mode: str | None = None) -> list[dict]:
     out = []
     if dirpath.is_dir():
         for p in sorted(dirpath.iterdir()):
             if p.is_file() and p.name not in known:
-                out.append(_tree_entry(f"{base}/{p.name}", kind))
+                out.append(_tree_entry(f"{base}/{p.name}", kind, mode))
     return out
 
 
+def _node(name: str, entries: list[dict], children: list[dict] | None = None) -> dict:
+    """One tree node with its counts rolled up from whatever sits under it.
+
+    n_expected/n_present describe the schema (what a complete run looks like);
+    n_files is everything actually on disk, which is all a figures/models node
+    can report since nothing there is enumerable up front.
+    """
+    children = children or []
+    exp = [e for e in entries if e["kind"] == "expected"]
+    return {
+        "name": name,
+        "entries": entries,
+        "children": children,
+        "n_expected": len(exp) + sum(c["n_expected"] for c in children),
+        "n_present": sum(e["status"] == "present" for e in exp)
+                     + sum(c["n_present"] for c in children),
+        "n_files": sum(e["status"] == "present" for e in entries)
+                   + sum(c["n_files"] for c in children),
+    }
+
+
 def file_tree() -> dict:
-    """Every artifact the pipeline schema expects (present or missing) plus any
-    extra files found on disk in those directories."""
-    sections = []
+    """Artifacts grouped by kind, then by pipeline.
 
-    def section(name, entries):
-        exp = [e for e in entries if e["kind"] == "expected"]
-        sections.append({"name": name, "entries": entries,
-                         "n_expected": len(exp),
-                         "n_present": sum(e["status"] == "present" for e in exp)})
-
+    Two levels only: the leaf table under a pipeline holds every ablation, so
+    any file is two clicks away.
+    """
     ds_known = {cfg["data"] for cfg in PIPELINES.values()}
-    ds_entries = [_tree_entry(f"{paths.DATA_PREFIX}/{cfg['data']}", "expected") for cfg in PIPELINES.values()]
-    ds_entries += _listdir_extra(DATA_DIR, paths.DATA_PREFIX, ds_known, "unexpected")
-    section(f"{paths.DATA_PREFIX} — input datasets", ds_entries)
+    ds = [_tree_entry(f"{paths.DATA_PREFIX}/{cfg['data']}", "expected")
+          for cfg in PIPELINES.values()]
+    ds += _listdir_extra(DATA_DIR, paths.DATA_PREFIX, ds_known, "unexpected")
 
     emb_known = {f"{m}_prompt.npy" for m in EMB_MODELS}
-    for pipeline in PIPELINES:
+    kinds: dict[str, list[dict]] = {k: [] for k in ("Embeddings", "Results", "Figures", "Models")}
+    for pipeline, cfg in PIPELINES.items():
+        bucket: dict[str, list[dict]] = {k: [] for k in kinds}
         for mode in MODES:
             base = f"{paths.RUNS_PREFIX}/{pipeline}/{mode}"
             d = run_dir(pipeline, mode)
-            entries = [_tree_entry(f"{base}/embeddings/{m}_prompt.npy", "expected") for m in EMB_MODELS]
-            entries += [_tree_entry(f"{base}/results/{name}", "expected") for name in EXPECTED_RESULTS]
-            entries += _listdir_extra(d / "embeddings", f"{base}/embeddings", emb_known, "unexpected")
-            entries += _listdir_extra(d / "results", f"{base}/results", set(EXPECTED_RESULTS), "unexpected")
-            for sub in ("figures", "models"):
-                entries += _listdir_extra(d / sub, f"{base}/{sub}", set(), "optional")
-            section(f"{pipeline} / {mode}", entries)
+            bucket["Embeddings"] += [
+                _tree_entry(f"{base}/embeddings/{m}_prompt.npy", "expected", mode)
+                for m in EMB_MODELS]
+            bucket["Embeddings"] += _listdir_extra(
+                d / "embeddings", f"{base}/embeddings", emb_known, "unexpected", mode)
+            bucket["Results"] += [_tree_entry(f"{base}/results/{n}", "expected", mode)
+                                  for n in EXPECTED_RESULTS]
+            bucket["Results"] += _listdir_extra(
+                d / "results", f"{base}/results", set(EXPECTED_RESULTS), "unexpected", mode)
+            bucket["Figures"] += _listdir_extra(
+                d / "figures", f"{base}/figures", set(), "optional", mode)
+            bucket["Models"] += _listdir_extra(
+                d / "models", f"{base}/models", set(), "optional", mode)
+        short = cfg["label"].split(" (")[0]  # drop the parenthetical; the tree is narrow
+        for kind, entries in bucket.items():
+            kinds[kind].append(_node(short, entries))
 
-    section(f"{paths.RUNS_PREFIX} — sweep aggregate",
-            [_tree_entry(paths.summary_rel(name), "expected") for name in paths.SUMMARY_FILES])
+    groups = [_node("Input datasets", ds)]
+    groups += [_node(kind, [], children) for kind, children in kinds.items()]
+    groups.append(_node("Other", [], _other_children()))
+    return {"groups": groups}
+
+
+def _other_children() -> list[dict]:
+    """Everything that is neither dataset nor part of a run tree: the sweep
+    aggregate, smoke output, and files left in the repo root by scripts run
+    with their default dirs."""
+    out = [_node("Summary", [_tree_entry(paths.summary_rel(n), "expected")
+                             for n in paths.SUMMARY_FILES])]
 
     # smoke runs (--limit) land in their own subtree so they cannot overwrite a
     # delivered run; list whatever is there so the output is still reachable
     smoke_root = paths.RUNS_WRITE_DIR / paths.SMOKE_SUBDIR
     smoke_prefix = f"{paths.WRITE_PREFIX}/{paths.SMOKE_SUBDIR}"
+    smoke = []
     if smoke_root.is_dir():
-        smoke = []
         for sub_dir in sorted(d for d in smoke_root.rglob("*") if d.is_dir()):
             rel = sub_dir.relative_to(smoke_root).as_posix()
-            smoke += _listdir_extra(sub_dir, f"{smoke_prefix}/{rel}", set(), "optional")
-        if smoke:
-            section("smoke runs (--limit output)", smoke)
+            for e in _listdir_extra(sub_dir, f"{smoke_prefix}/{rel}", set(), "optional"):
+                e["label"] = f"{rel}/{e['label']}"
+                smoke.append(e)
+    if smoke:
+        out.append(_node("Smoke runs", smoke))
 
-    # scripts run with their default dirs write to the repo root instead of runs/
     legacy = []
     for sub in ("embeddings", "results", "figures"):
-        legacy += _listdir_extra(ROOT / sub, sub, set(), "optional")
+        for e in _listdir_extra(ROOT / sub, sub, set(), "optional"):
+            e["label"] = e["path"]
+            legacy.append(e)
     if legacy:
-        section("legacy root outputs (scripts run with default dirs)", legacy)
-
-    return {"sections": sections}
+        out.append(_node("Legacy root output", legacy))
+    return out
 
 
 # ---------------- per-group breakdown (needs predictions.npz + dataset) ----------------
