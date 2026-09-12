@@ -5,7 +5,7 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 const MODE_SHORT = { normal: "normal", user_intent_only: "intent-only", context_only: "context-only" };
-/* pipeline focus for the headline/ablation cards (persisted; defaults to P3) */
+/* pipeline focus; drives every card on the Analysis tab (persisted, defaults to P3) */
 const ALL_PIPES = ["pipeline1_alamsabi", "pipeline2_organic_bipia", "pipeline3_organic_injected"];
 let PIPE_FOCUS;
 try { PIPE_FOCUS = new Set(JSON.parse(localStorage.getItem("pipeFocus"))); } catch { /* fall through */ }
@@ -13,7 +13,7 @@ if (!PIPE_FOCUS || !PIPE_FOCUS.size) PIPE_FOCUS = new Set(["pipeline3_organic_in
 
 function renderPipeChips() {
   const el = $("#pipe-chips");
-  el.innerHTML = `<span class="lbl">Focus</span>` + ALL_PIPES.map((p) =>
+  el.innerHTML = `<span class="lbl">Focus — all cards</span>` + ALL_PIPES.map((p) =>
     `<span class="pipe-chip ${PIPE_FOCUS.has(p) ? "sel" : ""}" data-pipe="${p}" title="${esc(pLabel(p))}">${pShort(p)}</span>`).join("");
   $$(".pipe-chip").forEach((c) => c.addEventListener("click", () => {
     const p = c.dataset.pipe;
@@ -25,11 +25,59 @@ function renderPipeChips() {
     }
     try { localStorage.setItem("pipeFocus", JSON.stringify([...PIPE_FOCUS])); } catch {}
     renderPipeChips();
-    renderHeadline();
+    renderMaster();
     renderAblation();
+    renderResultsTable();
   }));
 }
 const focusedResults = () => RESULTS.filter((r) => PIPE_FOCUS.has(r.Pipeline));
+
+/* Verdict thresholds, on best ROC-AUC per pipeline per mode. Intent-only scoring
+   high means the label is readable without any injection — a corpus artifact, not
+   detection. Move these two numbers to change what the strip claims. */
+const SHORTCUT_AUC = 0.90;   // intent-only at or above this = corpus shortcut
+const CHANCE_AUC = 0.60;     // intent-only at or below this = no signal without the injection
+const DETECT_AUC = 0.80;     // normal must clear this to count as detecting
+
+const SHORTCUT_CHIP = `<span class="chip shortcut" title="Scored from the user intent alone — the classes separate without any injection content (corpus shortcut, not detection)">shortcut</span>`;
+const isShortcut = (r) => r.Mode === "user_intent_only" && r["ROC-AUC"] >= SHORTCUT_AUC;
+
+/* Best ROC-AUC per mode for one pipeline, plus the verdict that follows from it. */
+function pipelineVerdict(pipeline) {
+  const best = {};
+  for (const r of RESULTS) {
+    if (r.Pipeline !== pipeline) continue;
+    if (best[r.Mode] === undefined || r["ROC-AUC"] > best[r.Mode]) best[r.Mode] = r["ROC-AUC"];
+  }
+  const normal = best.normal, intent = best.user_intent_only;
+  let verdict = "inconclusive";
+  if (intent >= SHORTCUT_AUC) verdict = "shortcut";
+  else if (intent <= CHANCE_AUC && normal >= DETECT_AUC) verdict = "detects";
+  if (normal === undefined && intent === undefined) verdict = "no runs";
+  return { pipeline, normal, intent, context: best.context_only, verdict };
+}
+
+const VERDICT_NOTE = {
+  detects: "intent alone is near chance — the signal is in the injected context",
+  shortcut: "intent alone already separates the classes — corpus artifact",
+  inconclusive: "neither clearly detecting nor clearly a shortcut",
+  "no runs": "no results for this pipeline yet",
+};
+
+function renderVerdicts() {
+  const cards = ALL_PIPES.map(pipelineVerdict).filter((v) => v.verdict !== "no runs");
+  const auc = (v) => (typeof v === "number" ? fmt(v, 4) : "—");
+  $("#verdict-strip").innerHTML = cards.map((v) => `<div class="verdict ${v.verdict}">
+    <div class="v-head"><b>${esc(pShort(v.pipeline))}</b>
+      <span class="v-tag">${v.verdict}</span></div>
+    <div class="v-name">${esc(pLabel(v.pipeline).replace(/^P\d+\s*·\s*/, ""))}</div>
+    <div class="v-nums">
+      <span>normal <b>${auc(v.normal)}</b></span>
+      <span>intent-only <b>${auc(v.intent)}</b></span>
+    </div>
+    <div class="v-why muted">${VERDICT_NOTE[v.verdict]}</div>
+  </div>`).join("");
+}
 
 /* in-cell micro bar: value scaled from 0.5 (empty) to 1.0 (full) */
 const microbar = (v) => typeof v === "number"
@@ -418,12 +466,12 @@ async function loadResults() {
   try { RESULTS = (await fetchJSON("/api/results")).rows; } catch { RESULTS = []; }
   const empty = !RESULTS.length;
   $("#no-results-card").style.display = empty ? "" : "none";
-  for (const id of ["#master-card", "#headline-card", "#ablation-card", "#allrows-card", "#figures-card"])
+  for (const id of ["#master-card", "#ablation-card", "#allrows-card", "#figures-card"])
     $(id).style.display = empty ? "none" : "";
   if (empty) return;
+  renderVerdicts();
   renderPipeChips();
   loadMaster();
-  renderHeadline();
   renderAblation();
   fillResultFilters();
   renderResultsTable();
@@ -460,7 +508,7 @@ async function loadMaster() {
 
 function masterRows() {
   if (!MASTER) return [];
-  let rows = MASTER.rows;
+  let rows = MASTER.rows.filter((r) => PIPE_FOCUS.has(r.Pipeline));
   if ($("#ms-collapse").value === "best") {
     const best = {};
     for (const r of rows) {
@@ -501,28 +549,38 @@ function renderMaster() {
   if (!MASTER) return;
   const metric = $("#ms-metric").value || "ROC-AUC";
   const showCost = $("#ms-cost").checked;
-  const vars = MASTER.variants;
   const rows = masterRows();
 
-  const q = ["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC", "PR-AUC"];
+  /* Delivered runs predate several metrics, so whole column groups arrive empty.
+     An em-dash grid reads as a broken table; drop what has no data anywhere. */
+  const has = (key) => rows.some((r) => typeof r[key] === "number");
+  const q = ["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC", "PR-AUC"].filter(has);
+  const errs = ["FPR", "FNR"].filter(has);
+  const degVars = MASTER.variants.filter((v) => has(`Deg:${v}:${metric}`));
+  const sigVars = MASTER.variants.filter((v) => has(`Sig:${v}:p_holm`));
+  const cost = showCost ? MASTER_COST.filter(([k]) => has(k)) : [];
+  const dropped = (6 - q.length) + (2 - errs.length)
+    + (MASTER.variants.length - sigVars.length) + (MASTER.variants.length - degVars.length);
+
   const qShort = { "Accuracy": "Acc", "Precision": "Prec", "Recall": "Rec",
                    "F1-Score": "F1", "ROC-AUC": "ROC-AUC", "PR-AUC": "PR-AUC" };
 
   // two-tier header: group band on top, columns beneath
+  const band = (n, label) => (n ? `<th colspan="${n}">${label}</th>` : "");
   let head = `<tr class="grp">
     <th colspan="4">Configuration</th>
-    <th colspan="${q.length}">Detection — ${esc(MODE_SHORT[MASTER.reference])}</th>
-    <th colspan="2">Errors</th>
-    <th colspan="${vars.length}">Ablation Δ ${esc(metric)} (pp)</th>
-    <th colspan="${vars.length}">McNemar p (Holm)</th>
-    ${showCost ? `<th colspan="${MASTER_COST.length}">Cost</th>` : ""}
+    ${band(q.length, `Detection — ${esc(MODE_SHORT[MASTER.reference])}`)}
+    ${band(errs.length, "Errors")}
+    ${band(degVars.length, `Ablation Δ ${esc(metric)} (pp)`)}
+    ${band(sigVars.length, "McNemar p (Holm)")}
+    ${band(cost.length, "Cost")}
     </tr>`;
   head += `<tr><th>Pipeline</th><th>Emb</th><th>Classifier</th><th></th>
     ${q.map((m) => `<th class="num">${qShort[m]}</th>`).join("")}
-    <th class="num">FPR</th><th class="num">FNR</th>
-    ${vars.map((v) => `<th class="num">→${MODE_SHORT[v]}</th>`).join("")}
-    ${vars.map((v) => `<th class="num">→${MODE_SHORT[v]}</th>`).join("")}
-    ${showCost ? MASTER_COST.map(([, l]) => `<th class="num">${l}</th>`).join("") : ""}
+    ${errs.map((e) => `<th class="num">${e}</th>`).join("")}
+    ${degVars.map((v) => `<th class="num">→${MODE_SHORT[v]}</th>`).join("")}
+    ${sigVars.map((v) => `<th class="num">→${MODE_SHORT[v]}</th>`).join("")}
+    ${cost.map(([, l]) => `<th class="num">${l}</th>`).join("")}
     </tr>`;
 
   let body = "", lastPipe = null;
@@ -535,15 +593,20 @@ function renderMaster() {
       <td class="wrapcell" title="${esc(pLabel(r.Pipeline))}">${esc(pShort(r.Pipeline))}</td>
       <td>${esc(r.Embeddings)}</td><td>${esc(r.Classifier)}</td><td>${flags}</td>
       ${q.map((m) => `<td class="num">${mfmt(r[m])}</td>`).join("")}
-      <td class="num">${mfmt(r.FPR)}</td><td class="num">${mfmt(r.FNR)}</td>
-      ${vars.map((v) => degCell(r[`Deg:${v}:${metric}`], r[`Sig:${v}:significant`], v)).join("")}
-      ${vars.map((v) => pCell(r[`Sig:${v}:p_holm`], r[`Sig:${v}:significant`])).join("")}
-      ${showCost ? MASTER_COST.map(([k, , p]) => `<td class="num">${mfmt(r[k], p)}</td>`).join("") : ""}
+      ${errs.map((e) => `<td class="num">${mfmt(r[e])}</td>`).join("")}
+      ${degVars.map((v) => degCell(r[`Deg:${v}:${metric}`], r[`Sig:${v}:significant`], v)).join("")}
+      ${sigVars.map((v) => pCell(r[`Sig:${v}:p_holm`], r[`Sig:${v}:significant`])).join("")}
+      ${cost.map(([k, , p]) => `<td class="num">${mfmt(r[k], p)}</td>`).join("")}
       </tr>`;
   }
   $("#master-table").innerHTML = head + body;
-  $("#master-notes").innerHTML = (MASTER.notes || [])
-    .map((n) => `<p class="muted note">ⓘ ${esc(n)}</p>`).join("");
+
+  const notes = MASTER.notes || [];
+  $("#master-notes").innerHTML = notes.length
+    ? `<details class="why"><summary>${dropped} empty column${dropped === 1 ? "" : "s"} hidden${
+        dropped ? " — " : ""}why these runs have no per-sample metrics</summary>
+       ${notes.map((n) => `<p class="muted note">${esc(n)}</p>`).join("")}</details>`
+    : "";
   $("#ms-msg").textContent = `${rows.length} row${rows.length === 1 ? "" : "s"}`;
 }
 
@@ -566,63 +629,70 @@ $("#ms-copy").addEventListener("click", async () => {
   } catch { $("#ms-msg").textContent = "clipboard blocked — select the table and copy"; }
 });
 
-function renderHeadline() {
-  const best = {};
-  for (const r of focusedResults()) {
-    const k = runKey(r);
-    if (!best[k] || r["ROC-AUC"] > best[k]["ROC-AUC"]) best[k] = r;
-  }
-  const rows = Object.values(best)
-    .sort((a, b) => b["ROC-AUC"] - a["ROC-AUC"])
-    .map((r, i) => {
-      // near-perfect intent-only means the class is readable without the injection: corpus shortcut
-      const shortcut = r.Mode === "user_intent_only" && r["ROC-AUC"] >= 0.99
-        ? `<span class="chip shortcut" title="Near-perfect from the user intent alone — the classes are separable without any injection content (corpus-style shortcut)">shortcut</span>` : "";
-      return `<tr class="${i === 0 ? "best" : ""}">
-      <td class="wrapcell">${esc(pLabel(r.Pipeline))}</td><td>${MODE_SHORT[r.Mode]}${shortcut}</td>
-      <td>${esc(r.Embeddings)}</td><td>${esc(r.Classifier)}</td>
-      <td class="num">${fmt(r.Accuracy)}</td><td class="num">${fmt(r["F1-Score"])}</td>
-      <td class="num">${fmt(r["ROC-AUC"])}${microbar(r["ROC-AUC"])}</td><td class="num">${fmt(r["PR-AUC"])}</td>
-      <td class="num">${fmt(r["Inference-Time-per-Sample(ms)"], 4)}</td>
-    </tr>`;
-    }).join("");
-  $("#headline-table").innerHTML =
-    `<tr><th>Pipeline</th><th>Mode</th><th>Emb</th><th>Classifier</th>
-      <th class="num">Acc</th><th class="num">F1</th><th class="num">ROC-AUC</th>
-      <th class="num">PR-AUC</th><th class="num">ms/sample</th></tr>${rows}`;
+/* Grouped horizontal bars, one group per pipeline x embedding, one bar per mode.
+   Categorical slots 1-3 of the validated dark palette (blue/orange/aqua) - the
+   three modes are identities, not statuses, so they get categorical hues and the
+   verdict strip carries the good/bad judgement.
+   The x axis starts at 0.5 because that is ROC-AUC chance, not a zoom: bar length
+   reads directly as "how far above chance", which is the question being asked. */
+const MODE_HUE = { normal: "var(--m-normal)", user_intent_only: "var(--m-intent)", context_only: "var(--m-context)" };
+const AB_GEO = { w: 820, pad: 118, right: 44, bar: 11, gap: 3, group: 16, top: 26 };
+
+/* rounded data-end, square against the baseline */
+function barPath(x, y, w, h, r = 4) {
+  const k = Math.min(r, w);
+  if (w <= 0) return "";
+  return `M${x},${y} H${x + w - k} a${k},${k} 0 0 1 ${k},${k} V${y + h - k} a${k},${k} 0 0 1 ${-k},${k} H${x} Z`;
 }
 
 function renderAblation() {
-  // best ROC-AUC per pipeline × embedding × mode
   const cell = {};
-  const pipes = new Set(), embs = new Set();
+  const groups = [];
   for (const r of focusedResults()) {
-    pipes.add(r.Pipeline); embs.add(r.Embeddings);
-    const k = `${r.Pipeline}|${r.Embeddings}|${r.Mode}`;
-    if (!cell[k] || r["ROC-AUC"] > cell[k]) cell[k] = r["ROC-AUC"];
+    const k = `${r.Pipeline}|${r.Embeddings}`;
+    if (!groups.some((g) => g.key === k)) groups.push({ key: k, pipeline: r.Pipeline, emb: r.Embeddings });
+    const ck = `${k}|${r.Mode}`;
+    if (cell[ck] === undefined || r["ROC-AUC"] > cell[ck]) cell[ck] = r["ROC-AUC"];
   }
   const modes = STATE ? STATE.modes : ["normal", "user_intent_only", "context_only"];
-  // heat tint: intent-only cells go red as they rise above chance (shortcut exposure);
-  // normal/context cells go green (legitimate detection strength)
-  const tint = (v, mode) => {
-    if (v === undefined) return "";
-    const strength = Math.max(0, Math.min(1, (v - 0.5) / 0.5));
-    return mode === "user_intent_only"
-      ? `background: rgba(208, 59, 59, ${(strength * 0.34).toFixed(3)})`
-      : `background: rgba(12, 163, 12, ${(strength * 0.22).toFixed(3)})`;
-  };
-  let html = `<tr><th>Pipeline</th><th>Emb</th>${modes.map((m) => `<th class="num">${MODE_SHORT[m]}</th>`).join("")}<th class="num">Δ(normal−context)</th></tr>`;
-  for (const p of pipes) {
-    for (const e of embs) {
-      const vals = modes.map((m) => cell[`${p}|${e}|${m}`]);
-      if (vals.every((v) => v === undefined)) continue;
-      const delta = (vals[0] !== undefined && vals[2] !== undefined) ? vals[0] - vals[2] : undefined;
-      html += `<tr><td>${esc(pShort(p))}</td><td>${esc(e)}</td>
-        ${vals.map((v, i) => `<td class="num" style="${tint(v, modes[i])}">${v === undefined ? "—" : fmt(v)}</td>`).join("")}
-        <td class="num">${delta === undefined ? "—" : (delta >= 0 ? "+" : "") + fmt(delta)}</td></tr>`;
-    }
-  }
-  $("#ablation-table").innerHTML = html;
+  const { w, pad, right, bar, gap, group, top } = AB_GEO;
+  const plot = w - pad - right;
+  const rowH = modes.length * bar + (modes.length - 1) * gap + group;
+  const h = top + groups.length * rowH + 8;
+  // 0.5 -> 0, 1.0 -> full width; a sub-chance value clamps but still prints exactly
+  const x = (v) => pad + Math.max(0, Math.min(1, (v - 0.5) / 0.5)) * plot;
+
+  const ticks = [0.5, 0.75, 1].map((t) => `
+    <line x1="${x(t)}" y1="${top - 8}" x2="${x(t)}" y2="${h - 8}" class="ab-grid"/>
+    <text x="${x(t)}" y="${top - 12}" class="ab-tick" text-anchor="middle">${t === 0.5 ? "0.50 chance" : t.toFixed(2)}</text>`).join("");
+
+  let body = "";
+  groups.forEach((g, gi) => {
+    const y0 = top + gi * rowH;
+    const mid = y0 + (modes.length * bar + (modes.length - 1) * gap) / 2 + 4;
+    body += `<text x="${pad - 10}" y="${mid}" class="ab-label" text-anchor="end">${esc(pShort(g.pipeline))} · ${esc(g.emb)}</text>`;
+    modes.forEach((m, mi) => {
+      const v = cell[`${g.key}|${m}`];
+      const y = y0 + mi * (bar + gap);
+      if (v === undefined) {
+        body += `<text x="${pad + 4}" y="${y + bar - 1}" class="ab-val ab-none">no run</text>`;
+        return;
+      }
+      const bw = x(v) - pad;
+      body += `<path d="${barPath(pad, y, bw, bar)}" fill="${MODE_HUE[m]}">
+          <title>${esc(pLabel(g.pipeline))} · ${esc(g.emb)} · ${MODE_SHORT[m]} — ROC-AUC ${fmt(v)}</title></path>
+        <text x="${x(v) + 6}" y="${y + bar - 1}" class="ab-val">${fmt(v)}</text>`;
+    });
+  });
+
+  const legend = modes.map((m) =>
+    `<span class="ab-key"><i style="background:${MODE_HUE[m]}"></i>${MODE_SHORT[m]}</span>`).join("");
+
+  $("#ablation-chart").innerHTML = `<div class="ab-legend">${legend}</div>
+    <svg viewBox="0 0 ${w} ${h}" class="ab-svg" role="img"
+      aria-label="Best ROC-AUC per pipeline and embedding, one bar per ablation mode">
+      ${ticks}${body}
+    </svg>`;
 }
 
 function fillResultFilters() {
@@ -635,6 +705,13 @@ function fillResultFilters() {
   };
   fill("#rf-pipeline", [...new Set(RESULTS.map((r) => r.Pipeline))], pShort);
   fill("#rf-mode", [...new Set(RESULTS.map((r) => r.Mode))], (m) => MODE_SHORT[m]);
+  /* Sorting every mode by ROC-AUC puts the intent-only corpus shortcut on top, which
+     reads as the best result. Land on normal; the dropdown still reaches the rest. */
+  const mode = $("#rf-mode");
+  if (!mode.dataset.defaulted) {
+    mode.dataset.defaulted = "1";
+    if ([...mode.options].some((o) => o.value === "normal")) mode.value = "normal";
+  }
   fill("#rf-emb", [...new Set(RESULTS.map((r) => r.Embeddings))]);
   fill("#rf-clf", [...new Set(RESULTS.map((r) => r.Classifier))]);
 }
@@ -648,23 +725,27 @@ function renderResultsTable() {
     Pipeline: $("#rf-pipeline").value, Mode: $("#rf-mode").value,
     Embeddings: $("#rf-emb").value, Classifier: $("#rf-clf").value,
   };
-  let rows = RESULTS.filter((r) => Object.entries(f).every(([k, v]) => !v || r[k] === v));
+  let rows = RESULTS.filter((r) => PIPE_FOCUS.has(r.Pipeline)
+    && Object.entries(f).every(([k, v]) => !v || r[k] === v));
   rows = rows.slice().sort((a, b) => {
     const av = a[sortCol], bv = b[sortCol];
     const c = typeof av === "number" ? av - bv : String(av).localeCompare(String(bv));
     return sortAsc ? c : -c;
   });
-  $("#rf-count").textContent = `${rows.length} of ${RESULTS.length} rows`;
+  const inFocus = RESULTS.filter((r) => PIPE_FOCUS.has(r.Pipeline)).length;
+  $("#rf-count").textContent = `${rows.length} of ${inFocus} rows`;
   const cols = ["Pipeline", "Mode", "Embeddings", "Classifier", "Accuracy", "F1-Score", "ROC-AUC", "PR-AUC", "Train-Time(s)", "Inference-Time-per-Sample(ms)"];
   const numCols = new Set(cols.slice(4));
   const header = cols.map((c) =>
     `<th class="${numCols.has(c) ? "num" : ""}" data-sort="${c}">${c === "Inference-Time-per-Sample(ms)" ? "ms/sample" : c}${sortCol === c ? (sortAsc ? " ▲" : " ▼") : ""}</th>`).join("");
   const body = rows.map((r) => `<tr>${cols.map((c) => {
     let v = r[c];
-    if (c === "Pipeline") v = pShort(v);
-    if (c === "Mode") v = MODE_SHORT[v];
-    const bar = c === "ROC-AUC" ? microbar(v) : "";
-    return `<td class="${numCols.has(c) ? "num" : ""}">${numCols.has(c) ? fmt(v, c.includes("Time") ? 3 : 4) + bar : esc(v)}</td>`;
+    if (numCols.has(c)) {
+      return `<td class="num">${fmt(v, c.includes("Time") ? 3 : 4)}${c === "ROC-AUC" ? microbar(v) : ""}</td>`;
+    }
+    if (c === "Pipeline") return `<td title="${esc(pLabel(v))}">${esc(pShort(v))}</td>`;
+    if (c === "Mode") return `<td>${MODE_SHORT[v]}${isShortcut(r) ? SHORTCUT_CHIP : ""}</td>`;
+    return `<td>${esc(v)}</td>`;
   }).join("")}</tr>`).join("");
   $("#results-table").innerHTML = `<tr>${header}</tr>${body}`;
   $$("#results-table [data-sort]").forEach((th) => th.addEventListener("click", () => {

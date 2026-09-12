@@ -38,3 +38,6 @@ personal.txt
 Thesis Artifacts/
 
 /thesis4-master
+
+# browser-automation scratch output
+.playwright-mcp/

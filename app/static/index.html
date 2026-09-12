@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>thesis_clean dashboard</title>
-<link rel="stylesheet" href="/static/style.css?v=27">
+<link rel="stylesheet" href="/static/style.css?v=29">
 </head>
 <body>
 <header>
@@ -117,6 +117,7 @@
 
 <!-- ============ RESULTS TAB ============ -->
 <section class="tab" id="tab-results">
+  <div id="verdict-strip" class="verdicts"></div>
   <div class="pipe-chips" id="pipe-chips"></div>
   <div class="card" id="no-results-card" style="display:none">
     <h2>No results yet</h2>
@@ -126,8 +127,7 @@
   </div>
 
   <div class="card" id="master-card">
-    <h2>Master results <span class="muted">— every pipeline in one grid: detection quality,
-      what each ablation costs, and whether that cost is significant</span></h2>
+    <h2>Master results</h2>
     <div class="row wrap gap">
       <label class="field"><span>Reference mode</span><select id="ms-reference">
         <option value="normal">normal</option>
@@ -136,30 +136,26 @@
       </select></label>
       <label class="field"><span>Δ metric</span><select id="ms-metric"></select></label>
       <label class="field"><span>Rows</span><select id="ms-collapse">
+        <option value="best" selected>best per pipeline × embedding</option>
         <option value="all">every classifier</option>
-        <option value="best">best classifier per pipeline × embedding</option>
       </select></label>
       <label class="chip-toggle"><input type="checkbox" id="ms-cost"><span>cost columns</span></label>
       <button class="btn small" id="ms-copy">Copy as CSV</button>
       <span class="msg" id="ms-msg"></span>
     </div>
-    <div class="scroll"><table id="master-table" class="master"></table></div>
     <div id="master-notes"></div>
-    <p class="muted">Δ is <b>absolute performance degradation</b> in percentage points:
-      reference − ablated, so positive means the ablation <b>hurt</b>. A non-positive Δ on
-      intent-only means the classes separate without the injection — a corpus shortcut, not
-      detection. <b>p</b> is a paired McNemar test (Holm-corrected) between the reference run
-      and the ablated run on the same frozen test rows.</p>
-  </div>
-
-  <div class="card" id="headline-card">
-    <h2>Headline <span class="muted">— best configuration per run (by ROC-AUC)</span></h2>
-    <div class="scroll"><table id="headline-table"></table></div>
+    <div class="scroll"><table id="master-table" class="master"></table></div>
+    <details class="why"><summary>How to read Δ and p</summary>
+      <p class="muted note">Δ is absolute degradation in percentage points: reference − ablated,
+        so positive means the ablation <b>hurt</b>. A non-positive Δ on intent-only means the
+        classes separate without the injection — a corpus shortcut, not detection.
+        <b>p</b> is a paired McNemar test (Holm-corrected) on the same frozen test rows.</p>
+    </details>
   </div>
 
   <div class="card" id="ablation-card">
-    <h2>Ablation <span class="muted">— best ROC-AUC per mode: does the signal come from the context, the intent, or the pair?</span></h2>
-    <div class="scroll"><table id="ablation-table"></table></div>
+    <h2>Ablation <span class="muted">— does the signal come from the context or the intent?</span></h2>
+    <div id="ablation-chart"></div>
   </div>
 
   <div class="card" id="allrows-card">
@@ -175,7 +171,7 @@
   </div>
 
   <div class="card" id="figures-card">
-    <h2>Static figures <span class="muted">— PNGs written by the pipeline for the selected run</span></h2>
+    <h2>Figures</h2>
     <div class="row wrap gap">
       <label class="field"><span>Run</span><select id="fig-run"></select></label>
     </div>
@@ -252,6 +248,6 @@
   <div id="peek-body"></div>
 </dialog>
 
-<script src="/static/app.js?v=25"></script>
+<script src="/static/app.js?v=28"></script>
 </body>
 </html>
