@@ -49,6 +49,11 @@ except ImportError:
 faulthandler.enable(all_threads=True)
 import numpy as np
 import pandas as pd
+import matplotlib
+# files only, never windows. Windows defaults to TkAgg, whose objects get
+# garbage-collected on joblib worker threads and abort the process
+# (Tcl_AsyncDelete: async handler deleted by the wrong thread).
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split
