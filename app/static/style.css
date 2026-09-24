@@ -158,7 +158,7 @@ h3 { font-size: 12px; color: var(--muted); margin: 8px 0 4px; font-weight: 650; 
    detection, or is the corpus separable without the injection at all? */
 .verdicts {
   display: grid; gap: 10px; margin-bottom: 14px;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(286px, 1fr));
 }
 .verdict {
   border: 1px solid var(--border); border-left: 3px solid var(--muted);
@@ -177,8 +177,16 @@ h3 { font-size: 12px; color: var(--muted); margin: 8px 0 4px; font-weight: 650; 
 .shortcut .v-tag { color: var(--bad); }
 .inconclusive .v-tag { color: var(--warn); }
 .v-name { font-size: 12.5px; color: var(--ink-2); margin-top: 3px; }
-.v-nums { display: flex; gap: 16px; margin-top: 10px; font-size: 13px; color: var(--muted); }
-.v-nums b { font-size: 14.5px; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--text); margin-left: 5px; }
+/* one row per mode, each number labelled with the metric it actually is:
+   ROC-AUC is ranking quality, accuracy is the 0.50-threshold hit rate */
+.v-nums { display: flex; flex-direction: column; gap: 5px; margin-top: 10px; color: var(--muted); }
+.v-row { display: grid; grid-template-columns: 72px 1fr 1fr; align-items: baseline; gap: 8px; }
+.v-mode { font-size: 12.5px; color: var(--ink-2); font-weight: 600; }
+.v-metric { font-size: 11px; letter-spacing: 0.01em; }
+.v-metric b {
+  font-size: 14.5px; font-weight: 650; font-variant-numeric: tabular-nums;
+  color: var(--text); margin-left: 5px;
+}
 .v-why { font-size: 12.5px; margin-top: 8px; line-height: 1.45; }
 
 /* collapsed explainer: the prose is available without occupying the page */

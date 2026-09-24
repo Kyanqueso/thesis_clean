@@ -7,7 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
-from app.runs import EMB_MODELS, MODES, PIPELINES, RUNS_DIR, run_dir
+from app import paths
+from app.runs import EMB_MODELS, MODES, PIPELINES, run_dir
 
 SEPARATOR = "\n\n---\n\n"  # must match generate_embeddings.py default
 
@@ -18,7 +19,8 @@ _embedder_cache: dict[str, object] = {}
 def available_models() -> list[dict]:
     """Scan runs/*/*/models/*.joblib for scorable configurations."""
     out = []
-    if not RUNS_DIR.is_dir():
+    paths.ensure_current()
+    if not paths.RUNS_DIR.is_dir():
         return out
     for pipeline in PIPELINES:
         for mode in MODES:

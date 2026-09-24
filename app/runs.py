@@ -17,7 +17,11 @@ import pandas as pd
 from sklearn.metrics import precision_recall_curve, roc_auc_score, roc_curve, auc
 
 from app import paths
-from app.paths import DATA_DIR, ROOT, RUNS_DIR  # noqa: F401  (re-exported for detect/jobs)
+from app.paths import ROOT  # noqa: F401  (re-exported for jobs)
+
+# The tree locations are read through `paths` on every call, never imported by
+# value: app.paths re-resolves them when a runs/ folder appears or is replaced
+# while the server is up, and a from-import would freeze the old path here.
 
 PIPELINES = {
     "pipeline1_alamsabi": {
@@ -40,11 +44,11 @@ _CURVE_CACHE: dict[tuple, dict] = {}
 
 
 def run_dir(pipeline: str, mode: str) -> Path:
-    return RUNS_DIR / pipeline / mode
+    return paths.RUNS_DIR / pipeline / mode
 
 
 def data_path(pipeline: str) -> Path:
-    return DATA_DIR / PIPELINES[pipeline]["data"]
+    return paths.DATA_DIR / PIPELINES[pipeline]["data"]
 
 
 def _file_info(p: Path) -> dict | None:
@@ -56,7 +60,12 @@ def _file_info(p: Path) -> dict | None:
 
 
 def scan_state() -> dict:
-    """Full artifact matrix: datasets + per-run embeddings/results/figures/models."""
+    """Full artifact matrix: datasets + per-run embeddings/results/figures/models.
+
+    Nothing here is cached: the UI polls this every few seconds, so a run that
+    finishes — or a whole runs/ tree that lands — shows up on the next poll.
+    """
+    paths.ensure_current()
     datasets = {}
     for key, cfg in PIPELINES.items():
         datasets[key] = {"label": cfg["label"], "file": cfg["data"],
@@ -125,6 +134,7 @@ def _json_rows(df: pd.DataFrame) -> list[dict]:
 
 def all_results() -> list[dict]:
     """Every run's full_evaluation_results.csv, tagged with Pipeline/Mode."""
+    paths.ensure_current()
     frames = []
     for pipeline in PIPELINES:
         for mode in MODES:
@@ -162,7 +172,7 @@ def _ablation_significance(pipeline: str) -> dict:
     under both orderings: McNemar is symmetric, only the sign of the accuracy
     difference flips, and the table asks for whichever direction it renders.
     """
-    path = RUNS_DIR / pipeline / "ablation_mcnemar.csv"
+    path = paths.RUNS_DIR / pipeline / "ablation_mcnemar.csv"
     if not path.is_file():
         return {}
     try:
@@ -405,7 +415,7 @@ def file_tree() -> dict:
     ds_known = {cfg["data"] for cfg in PIPELINES.values()}
     ds = [_tree_entry(f"{paths.DATA_PREFIX}/{cfg['data']}", "expected")
           for cfg in PIPELINES.values()]
-    ds += _listdir_extra(DATA_DIR, paths.DATA_PREFIX, ds_known, "unexpected")
+    ds += _listdir_extra(paths.DATA_DIR, paths.DATA_PREFIX, ds_known, "unexpected")
 
     emb_known = {f"{m}_prompt.npy" for m in EMB_MODELS}
     kinds: dict[str, list[dict]] = {k: [] for k in ("Embeddings", "Results", "Figures", "Models")}

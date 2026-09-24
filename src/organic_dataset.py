@@ -225,18 +225,66 @@ def pull_cosqa(n: int, seed: int) -> list[dict]:
     return _topup(rows, dupes, n, "CoSQA")
 
 
-def pull_enron(n: int, seed: int) -> list[dict]:
-    print(f"  Pulling Enron Email (target {n:,} rows)...")
-    ds = load_dataset("corbt/enron-emails", split="train", streaming=True)
-    ds = ds.shuffle(seed=seed, buffer_size=20000)
-    rows, dupes, seen = [], [], set()
-    for i, row in enumerate(tqdm(ds, desc="Enron", total=n)):
-        body = (row.get("body") or "").strip()
-        subject = (row.get("subject") or "").strip()
+def pull_aeslc(n: int, seed: int, deidentify: bool = True) -> list[dict]:
+    """Emails from AESLC (Zhang and Tetreault, ACL 2019) rather than the raw
+    Enron corpus.
+
+    Both are Enron mail, but AESLC is the curated subset: its authors kept only
+    inbox/sent messages, stripped boilerplate the sender did not write, dropped
+    replies and forwards so a body always matches its own subject, and required
+    at least 3 sentences and 25 words. The raw corpus used before carried all of
+    that — 46.6% of the rows it gave us were replies or forwards, some with a
+    bare "RE:" as the user intent.
+
+    AESLC is NOT de-identified at source: bodies still name people and carry
+    phone numbers and addresses. Every email is therefore cleaned and scrubbed
+    here, before dedup and before anything downstream sees it, so no raw email
+    text reaches data/, the embeddings or the dashboard. `deidentify=False` is
+    for the audit tool only, which needs the before/after pair.
+
+    18,302 emails over the three splits, which are combined here: the subject
+    line generation split is irrelevant to injection detection, and one pool of
+    ~15.6k usable emails covers the 7,000 target. doc_ids are positional, so
+    they carry no pointer back to a source record.
+    """
+    print(f"  Pulling AESLC email (target {n:,} rows)...")
+    ds = load_dataset("Yale-LILY/aeslc")
+    combined = concatenate_datasets([ds[s] for s in ("train", "validation", "test")])
+    # small enough to index directly; shuffle the order so the pool is drawn
+    # across all three splits rather than filling up from train alone
+    order = list(range(len(combined)))
+    random.Random(seed).shuffle(order)
+
+    # Raw candidates first — filtering is cheap, de-identification is not, and
+    # the name vocabulary has to see the whole pool at once. The margin covers
+    # the few emails that fall under the length floor once a disclaimer is cut.
+    candidates = []
+    for i in tqdm(order, desc="AESLC"):
+        row = combined[i]
+        body = (row.get("email_body") or "").strip()
+        subject = (row.get("subject_line") or "").strip()
         if len(subject) < 3 or not usable_length(body, 200, 5000):
             continue
-        entry = {"doc_id": f"enron_{row.get('message_id', i)}",
-                 "context": body, "user_intent": subject}
+        candidates.append((body, subject))
+        if len(candidates) >= int(n * 1.2) + 50:
+            break
+
+    if deidentify:
+        from anonymize_enron import scrub_pool
+        print(f"   de-identifying {len(candidates):,} emails "
+              f"(Presidio + Enron recognizers + pool name vocabulary)...")
+        candidates, vocab_size = scrub_pool(candidates)
+        print(f"   name vocabulary: {vocab_size:,} names swept over every email")
+
+    rows, dupes, seen = [], [], set()
+    for body, subject in candidates:
+        # cutting a disclaimer can take a body under the floor, and a subject
+        # that was only a name is now only a placeholder
+        if len(subject) < 3 or not usable_length(body, 200, 5000):
+            continue
+        # dedup on the text we will actually keep: two emails differing only in
+        # the names they mention are the same document once scrubbed
+        entry = {"doc_id": None, "context": body, "user_intent": subject}
         if body in seen:
             dupes.append(entry)
             continue
@@ -244,7 +292,10 @@ def pull_enron(n: int, seed: int) -> list[dict]:
         rows.append(entry)
         if len(rows) >= n:
             break
-    return _topup(rows, dupes, n, "Enron Email")
+    rows = _topup(rows, dupes, n, "AESLC email")
+    for k, row in enumerate(rows):
+        row["doc_id"] = f"aeslc_{k:05d}"
+    return rows
 
 
 def pull_cnn_dailymail(n: int, seed: int) -> list[dict]:
@@ -280,7 +331,7 @@ SOURCES = {
     "ms_marco": {"display": "MS MARCO v2.1", "pipeline3_n": 7000, "pull": pull_ms_marco, "attack_kind": "text"},
     "fetaqa": {"display": "FeTaQA", "pipeline3_n": 7000, "pull": pull_fetaqa, "attack_kind": "text"},
     "cosqa": {"display": "CoSQA", "pipeline3_n": 7000, "pull": pull_cosqa, "attack_kind": "code"},
-    "enron": {"display": "Enron Email", "pipeline3_n": 7000, "pull": pull_enron, "attack_kind": "text"},
+    "aeslc": {"display": "AESLC Email", "pipeline3_n": 7000, "pull": pull_aeslc, "attack_kind": "text"},
     "cnn_dailymail": {"display": "CNN/DailyMail", "pipeline3_n": 7000, "pull": pull_cnn_dailymail, "attack_kind": "text"},
 }
 

@@ -11,11 +11,17 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.paths import DATA_DIR, RUNS_WRITE_DIR, write_run_dir
+from app import paths
+from app.paths import write_run_dir
 from app.runs import MODES, PIPELINES, ROOT, data_path
 
 SRC_DIR = ROOT / "src"
-LOG_DIR = RUNS_WRITE_DIR / "_logs"
+
+
+def log_dir() -> Path:
+    """Current write tree's log folder. A function, not a constant: app.paths
+    re-resolves the tree while the server runs."""
+    return paths.RUNS_WRITE_DIR / "_logs"
 
 
 class ValidationError(Exception):
@@ -34,10 +40,13 @@ class Job:
     finished: float | None = None
     returncode: int | None = None
     cancel_requested: bool = False
+    # pinned when the job is created, so a tree that moves mid-session cannot
+    # strand a running job's log somewhere the reader no longer looks
+    logs_root: Path = field(default_factory=log_dir)
 
     @property
     def log_path(self) -> Path:
-        return LOG_DIR / f"{self.id}.log"
+        return self.logs_root / f"{self.id}.log"
 
     def public(self) -> dict:
         return {
@@ -65,14 +74,14 @@ def build_cmds(stage: str, params: dict) -> list[list[str]]:
     if stage == "dataset":
         which = params.get("which")
         if which == "alamsabi":
-            return [[py, str(SRC_DIR / "download_dataset.py"), "--out-dir", str(DATA_DIR)]]
+            return [[py, str(SRC_DIR / "download_dataset.py"), "--out-dir", str(paths.DATA_DIR)]]
         if which == "organic":
-            return [[py, str(SRC_DIR / "organic_dataset.py"), "--out-dir", str(DATA_DIR)]]
+            return [[py, str(SRC_DIR / "organic_dataset.py"), "--out-dir", str(paths.DATA_DIR)]]
         raise ValidationError("dataset job needs which=alamsabi|organic")
 
     if stage == "sweep":
         cmd = [py, str(SRC_DIR / "run_all_pipelines.py"),
-               "--data-dir", str(DATA_DIR), "--runs-dir", str(RUNS_WRITE_DIR)]
+               "--data-dir", str(paths.DATA_DIR), "--runs-dir", str(paths.RUNS_WRITE_DIR)]
         if params.get("limit"):
             cmd += ["--limit", str(int(params["limit"]))]
         if params.get("models"):
@@ -101,7 +110,7 @@ def build_cmds(stage: str, params: dict) -> list[list[str]]:
         run_data = src
         if smoke:
             run_data = _limited_copy(src, int(params["limit"]),
-                                     RUNS_WRITE_DIR / "_smoke_data" / f"{pipeline}.jsonl")
+                                     paths.RUNS_WRITE_DIR / "_smoke_data" / f"{pipeline}.jsonl")
 
         d = write_run_dir(pipeline, mode, smoke=smoke)
         gen_cmd = [py, str(SRC_DIR / "generate_embeddings.py"),
@@ -138,7 +147,7 @@ class JobQueue:
     def enqueue(self, stage: str, params: dict) -> Job:
         cmds = build_cmds(stage, params)
         job = Job(id=uuid.uuid4().hex[:12], stage=stage, params=params, cmds=cmds)
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        job.log_path.parent.mkdir(parents=True, exist_ok=True)
         job.log_path.write_text("", encoding="utf-8")
         with self._lock:
             self.jobs[job.id] = job

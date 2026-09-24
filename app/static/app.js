@@ -41,19 +41,24 @@ const CHANCE_AUC = 0.60;     // intent-only at or below this = no signal without
 const DETECT_AUC = 0.80;     // normal must clear this to count as detecting
 
 
-/* Best ROC-AUC per mode for one pipeline, plus the verdict that follows from it. */
+/* Best row per mode for one pipeline, ranked by ROC-AUC, plus the verdict that
+   follows from it. The whole row is kept, not just its AUC: the card also shows
+   that configuration's accuracy, and both numbers have to describe the SAME
+   model — "best AUC" and "best accuracy" are not always the same row. */
 function pipelineVerdict(pipeline) {
   const best = {};
   for (const r of RESULTS) {
     if (r.Pipeline !== pipeline) continue;
-    if (best[r.Mode] === undefined || r["ROC-AUC"] > best[r.Mode]) best[r.Mode] = r["ROC-AUC"];
+    const cur = best[r.Mode];
+    if (!cur || (r["ROC-AUC"] ?? -1) > (cur["ROC-AUC"] ?? -1)) best[r.Mode] = r;
   }
-  const normal = best.normal, intent = best.user_intent_only;
+  const aucOf = (m) => (best[m] ? best[m]["ROC-AUC"] : undefined);
+  const normal = aucOf("normal"), intent = aucOf("user_intent_only");
   let verdict = "inconclusive";
   if (intent >= SHORTCUT_AUC) verdict = "shortcut";
   else if (intent <= CHANCE_AUC && normal >= DETECT_AUC) verdict = "detects";
   if (normal === undefined && intent === undefined) verdict = "no runs";
-  return { pipeline, normal, intent, context: best.context_only, verdict };
+  return { pipeline, best, normal, intent, context: aucOf("context_only"), verdict };
 }
 
 const VERDICT_NOTE = {
@@ -63,16 +68,30 @@ const VERDICT_NOTE = {
   "no runs": "no results for this pipeline yet",
 };
 
+/* One labelled line per mode: which configuration won, how well it RANKS
+   (ROC-AUC) and how often it is RIGHT at the 0.50 threshold (accuracy). Both
+   are named in the markup — a bare 0.9818 reads as accuracy when it is not, and
+   the two differ by ~5 points on P3. */
+function verdictRow(v, mode, label) {
+  const row = v.best[mode];
+  const num = (x) => (typeof x === "number" ? fmt(x, 4) : "—");
+  const clf = row ? `${row.Embeddings} + ${row.Classifier}` : "no run for this mode";
+  return `<div class="v-row" title="Best ROC-AUC configuration: ${esc(clf)}">
+    <span class="v-mode">${label}</span>
+    <span class="v-metric">ROC-AUC <b>${num(row && row["ROC-AUC"])}</b></span>
+    <span class="v-metric">accuracy <b>${num(row && row["Accuracy"])}</b></span>
+  </div>`;
+}
+
 function renderVerdicts() {
   const cards = ALL_PIPES.map(pipelineVerdict).filter((v) => v.verdict !== "no runs");
-  const auc = (v) => (typeof v === "number" ? fmt(v, 4) : "—");
   $("#verdict-strip").innerHTML = cards.map((v) => `<div class="verdict ${v.verdict}">
     <div class="v-head"><b>${esc(pShort(v.pipeline))}</b>
       <span class="v-tag">${v.verdict}</span></div>
     <div class="v-name">${esc(pLabel(v.pipeline).replace(/^P\d+\s*·\s*/, ""))}</div>
     <div class="v-nums">
-      <span>normal <b>${auc(v.normal)}</b></span>
-      <span>intent-only <b>${auc(v.intent)}</b></span>
+      ${verdictRow(v, "normal", "normal")}
+      ${verdictRow(v, "user_intent_only", "intent-only")}
     </div>
     <div class="v-why muted">${VERDICT_NOTE[v.verdict]}</div>
   </div>`).join("");
@@ -121,8 +140,35 @@ const SELECTED = new Set();      // "pipeline|mode"
 let LAST_RUN_KEYS = new Set();   // what the most recent launch covered
 let SEL_INIT = false;
 
+/* What the Analysis tab is a view of. Results are read off disk on every
+   request, so the only thing that can go stale is the page: this fingerprints
+   the artifacts /api/state reports and reloads the tab when they change — a run
+   finishing, or a whole runs/ tree dropped in beside the repo. */
+let RESULTS_SIG = null;
+
+function resultsSignature(state) {
+  return JSON.stringify([
+    state.paths && state.paths.runs_dir,
+    state.has_sweep_summary,
+    (state.runs || []).map((r) => [
+      r.pipeline, r.mode, r.has_results, r.has_predictions,
+      r.results_info && r.results_info.mtime, r.results_info && r.results_info.size,
+      r.figures.length, r.models.length,
+    ]),
+  ]);
+}
+
 async function refreshState() {
   try { STATE = await fetchJSON("/api/state"); } catch { return; }
+
+  // a changed fingerprint means the tab is showing something that no longer
+  // matches disk; reload it when it is open, and let the tab-click handler do
+  // it otherwise so a background change costs nothing
+  const sig = resultsSignature(STATE);
+  if (sig !== RESULTS_SIG) {
+    RESULTS_SIG = sig;
+    if ($("#tab-results").classList.contains("active")) loadResults();
+  }
   // preselect only what can actually run: a pipeline with no dataset on disk
   // would otherwise sit checked and silently do nothing. A flag, not an
   // emptiness test, so clearing every cell by hand stays cleared.
