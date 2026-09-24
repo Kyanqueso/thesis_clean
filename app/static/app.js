@@ -28,6 +28,7 @@ function renderPipeChips() {
     renderMaster();
     renderAblation();
     renderResultsTable();
+    renderFigPicker();
   }));
 }
 const focusedResults = () => RESULTS.filter((r) => PIPE_FOCUS.has(r.Pipeline));
@@ -39,8 +40,6 @@ const SHORTCUT_AUC = 0.90;   // intent-only at or above this = corpus shortcut
 const CHANCE_AUC = 0.60;     // intent-only at or below this = no signal without the injection
 const DETECT_AUC = 0.80;     // normal must clear this to count as detecting
 
-const SHORTCUT_CHIP = `<span class="chip shortcut" title="Scored from the user intent alone — the classes separate without any injection content (corpus shortcut, not detection)">shortcut</span>`;
-const isShortcut = (r) => r.Mode === "user_intent_only" && r["ROC-AUC"] >= SHORTCUT_AUC;
 
 /* Best ROC-AUC per mode for one pipeline, plus the verdict that follows from it. */
 function pipelineVerdict(pipeline) {
@@ -476,7 +475,7 @@ async function loadResults() {
   renderAblation();
   fillResultFilters();
   renderResultsTable();
-  fillFigRunSelect();
+  renderFigPicker();
 }
 
 function runKey(r) { return `${r.Pipeline}|${r.Mode}`; }
@@ -485,10 +484,13 @@ function runKey(r) { return `${r.Pipeline}|${r.Mode}`; }
 let MASTER = null;
 
 const MASTER_COST = [
-  ["Latency-P50(ms)", "p50 ms", 3], ["Latency-P99(ms)", "p99 ms", 3],
+  ["Latency-P50(ms)", "p50 ms", 2], ["Latency-P99(ms)", "p99 ms", 2],
   ["Train-Time(s)", "fit s", 1], ["Train-PeakRSS(MB)", "RSS MB", 0],
   ["Train-PeakVRAM(MB)", "VRAM MB", 0],
 ];
+
+// the one long classifier name sets the column width for every row
+const CLF_SHORT = { LogisticRegression: "LogReg" };
 
 // the shared fmt() renders a missing value as blank; in this grid a blank cell
 // reads as "zero", so absent metrics get an explicit em dash instead
@@ -531,25 +533,28 @@ function masterRows() {
 //   context-only — dropping the intent and losing nothing is an ordinary
 //                  finding (the signal lives in the document), not a defect.
 // Colouring both the same way cried wolf on every P1/P3 row.
-function degCell(value, sig, variant) {
+// The McNemar p used to have its own columns, but the Δ cell already carries
+// its verdict ("ns"), so the exact value moved into the cell's hover text.
+function degCell(value, sig, variant, p) {
   if (value === null || value === undefined) return `<td class="num">—</td>`;
   const pp = value * 100;
   const alarm = variant === "user_intent_only";
   const cls = pp > 0.5 ? "deg-pos" : (alarm ? "deg-neg" : "deg-quiet");
   const mark = sig === false ? " ns" : "";
-  return `<td class="num ${cls}">${pp >= 0 ? "+" : ""}${pp.toFixed(2)}<span class="ns">${mark}</span></td>`;
+  return `<td class="num ${cls}" title="${esc(pTitle(p, sig))}">${pp >= 0 ? "+" : ""}${pp.toFixed(2)}<span class="ns">${mark}</span></td>`;
 }
 
-function pCell(p, sig) {
-  if (p === null || p === undefined) return `<td class="num muted" title="needs predictions.npz from every mode">—</td>`;
-  const txt = p < 1e-4 ? p.toExponential(0).replace("e-", "e−") : p.toFixed(4);
-  return `<td class="num ${sig ? "sig-yes" : "sig-no"}">${txt}${sig ? " ✓" : ""}</td>`;
+// p is Holm-corrected; at n≈14k it underflows to exactly 0, which toExponential
+// would print as "0e+0"
+function pTitle(p, sig) {
+  if (p === null || p === undefined) return "McNemar p: needs predictions.npz from every mode";
+  const txt = p === 0 ? "< 1e-300" : p < 1e-4 ? `= ${p.toExponential(0)}` : `= ${p.toFixed(4)}`;
+  return `McNemar p ${txt} (Holm) — ${sig ? "significant" : "not significant"}`;
 }
 
 function renderMaster() {
   if (!MASTER) return;
   const metric = $("#ms-metric").value || "ROC-AUC";
-  const showCost = $("#ms-cost").checked;
   const rows = masterRows();
 
   /* Delivered runs predate several metrics, so whole column groups arrive empty.
@@ -558,10 +563,8 @@ function renderMaster() {
   const q = ["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC", "PR-AUC"].filter(has);
   const errs = ["FPR", "FNR"].filter(has);
   const degVars = MASTER.variants.filter((v) => has(`Deg:${v}:${metric}`));
-  const sigVars = MASTER.variants.filter((v) => has(`Sig:${v}:p_holm`));
-  const cost = showCost ? MASTER_COST.filter(([k]) => has(k)) : [];
-  const dropped = (6 - q.length) + (2 - errs.length)
-    + (MASTER.variants.length - sigVars.length) + (MASTER.variants.length - degVars.length);
+  const cost = MASTER_COST.filter(([k]) => has(k));
+  const dropped = (6 - q.length) + (2 - errs.length) + (MASTER.variants.length - degVars.length);
 
   const qShort = { "Accuracy": "Acc", "Precision": "Prec", "Recall": "Rec",
                    "F1-Score": "F1", "ROC-AUC": "ROC-AUC", "PR-AUC": "PR-AUC" };
@@ -569,18 +572,16 @@ function renderMaster() {
   // two-tier header: group band on top, columns beneath
   const band = (n, label) => (n ? `<th colspan="${n}">${label}</th>` : "");
   let head = `<tr class="grp">
-    <th colspan="4">Configuration</th>
+    <th colspan="3">Configuration</th>
     ${band(q.length, `Detection — ${esc(MODE_SHORT[MASTER.reference])}`)}
     ${band(errs.length, "Errors")}
     ${band(degVars.length, `Ablation Δ ${esc(metric)} (pp)`)}
-    ${band(sigVars.length, "McNemar p (Holm)")}
     ${band(cost.length, "Cost")}
     </tr>`;
-  head += `<tr><th>Pipeline</th><th>Emb</th><th>Classifier</th><th></th>
+  head += `<tr><th>Pipeline</th><th>Emb</th><th>Classifier</th>
     ${q.map((m) => `<th class="num">${qShort[m]}</th>`).join("")}
     ${errs.map((e) => `<th class="num">${e}</th>`).join("")}
     ${degVars.map((v) => `<th class="num">→${MODE_SHORT[v]}</th>`).join("")}
-    ${sigVars.map((v) => `<th class="num">→${MODE_SHORT[v]}</th>`).join("")}
     ${cost.map(([, l]) => `<th class="num">${l}</th>`).join("")}
     </tr>`;
 
@@ -588,15 +589,15 @@ function renderMaster() {
   for (const r of rows) {
     const sep = lastPipe && lastPipe !== r.Pipeline ? " pipe-sep" : "";
     lastPipe = r.Pipeline;
-    const flags = (r.Flags || []).map((f) =>
-      `<span class="chip ${f}" title="Ablating the user intent costs nothing — the classes are separable without the injection, so this is corpus discrimination rather than injection detection">${f}</span>`).join("");
+    // no shortcut chip here: the verdict cards name the pipeline and the red
+    // intent-only Δ marks the row, so a chip column only cost width
     body += `<tr class="${sep}">
-      <td class="wrapcell" title="${esc(pLabel(r.Pipeline))}">${esc(pShort(r.Pipeline))}</td>
-      <td>${esc(r.Embeddings)}</td><td>${esc(r.Classifier)}</td><td>${flags}</td>
+      <td title="${esc(pLabel(r.Pipeline))}">${esc(pShort(r.Pipeline))}</td>
+      <td>${esc(r.Embeddings)}</td>
+      <td title="${esc(r.Classifier)}">${esc(CLF_SHORT[r.Classifier] || r.Classifier)}</td>
       ${q.map((m) => `<td class="num">${mfmt(r[m])}</td>`).join("")}
       ${errs.map((e) => `<td class="num">${mfmt(r[e])}</td>`).join("")}
-      ${degVars.map((v) => degCell(r[`Deg:${v}:${metric}`], r[`Sig:${v}:significant`], v)).join("")}
-      ${sigVars.map((v) => pCell(r[`Sig:${v}:p_holm`], r[`Sig:${v}:significant`])).join("")}
+      ${degVars.map((v) => degCell(r[`Deg:${v}:${metric}`], r[`Sig:${v}:significant`], v, r[`Sig:${v}:p_holm`])).join("")}
       ${cost.map(([k, , p]) => `<td class="num">${mfmt(r[k], p)}</td>`).join("")}
       </tr>`;
   }
@@ -620,7 +621,7 @@ function masterCSV() {
     }).join(",")).join("\n");
 }
 
-["#ms-metric", "#ms-collapse", "#ms-cost"].forEach((id) =>
+["#ms-metric", "#ms-collapse"].forEach((id) =>
   $(id).addEventListener("change", renderMaster));
 $("#ms-reference").addEventListener("change", loadMaster);
 $("#ms-copy").addEventListener("click", async () => {
@@ -634,67 +635,170 @@ $("#ms-copy").addEventListener("click", async () => {
    Categorical slots 1-3 of the validated dark palette (blue/orange/aqua) - the
    three modes are identities, not statuses, so they get categorical hues and the
    verdict strip carries the good/bad judgement.
-   The x axis starts at 0.5 because that is ROC-AUC chance, not a zoom: bar length
-   reads directly as "how far above chance", which is the question being asked. */
+   An ablation holds the model fixed and changes only the input, so each group is
+   ONE classifier — the one Master results shows (best normal-mode ROC-AUC) — and
+   the gap between its bars is exactly the table's Δ. Picking the best classifier
+   per bar instead mixed models inside a group and disagreed with the table.
+   Bars grow out of the 0.50 chance line: right = better than guessing, left =
+   worse. The axis only extends below 0.50 when some bar actually goes there. */
 const MODE_HUE = { normal: "var(--m-normal)", user_intent_only: "var(--m-intent)", context_only: "var(--m-context)" };
-const AB_GEO = { w: 820, pad: 118, right: 44, bar: 11, gap: 3, group: 16, top: 26 };
+const AB_GEO = { pad: 120, right: 66, bar: 18, gap: 4, group: 26, sep: 22, top: 34 };
+let AB_GROUPS = [];   // what the chart drew, for the hover card
+let AB_W = 0;         // width it was drawn at, so a resize can redraw
 
-/* rounded data-end, square against the baseline */
-function barPath(x, y, w, h, r = 4) {
-  const k = Math.min(r, w);
-  if (w <= 0) return "";
-  return `M${x},${y} H${x + w - k} a${k},${k} 0 0 1 ${k},${k} V${y + h - k} a${k},${k} 0 0 1 ${-k},${k} H${x} Z`;
+/* rounded at the data end (x1), square against the chance baseline (x0) */
+function barPath(x0, x1, y, h, r = 4) {
+  const w = Math.abs(x1 - x0);
+  if (w < 0.5) return "";
+  const k = Math.min(r, w, h / 2);
+  return x1 > x0
+    ? `M${x0},${y} H${x1 - k} a${k},${k} 0 0 1 ${k},${k} V${y + h - k} a${k},${k} 0 0 1 ${-k},${k} H${x0} Z`
+    : `M${x0},${y} H${x1 + k} a${k},${k} 0 0 0 ${-k},${k} V${y + h - k} a${k},${k} 0 0 0 ${k},${k} H${x0} Z`;
+}
+
+/* Same rows, same order, same pick as Master results with reference = normal:
+   pipeline order, then embedding, then the classifier with the best normal ROC-AUC. */
+function ablationGroups(modes) {
+  const auc = {};
+  const configs = new Map();
+  for (const r of focusedResults()) {
+    auc[`${r.Pipeline}|${r.Embeddings}|${r.Classifier}|${r.Mode}`] = r["ROC-AUC"];
+    const k = `${r.Pipeline}|${r.Embeddings}`;
+    if (!configs.has(k)) configs.set(k, { pipeline: r.Pipeline, emb: r.Embeddings, clfs: new Set() });
+    configs.get(k).clfs.add(r.Classifier);
+  }
+  const order = (c) => ALL_PIPES.indexOf(c.pipeline);
+  return [...configs.values()]
+    .sort((a, b) => order(a) - order(b) || String(a.emb).localeCompare(String(b.emb)))
+    .map((c) => {
+      let clf = null, best = -1;
+      for (const k of [...c.clfs].sort()) {
+        const v = auc[`${c.pipeline}|${c.emb}|${k}|normal`];
+        if (typeof v === "number" && v > best) { best = v; clf = k; }
+      }
+      if (!clf) return null;   // no normal run to anchor on, same as the table
+      const vals = {};
+      for (const m of modes) vals[m] = auc[`${c.pipeline}|${c.emb}|${clf}|${m}`];
+      return { pipeline: c.pipeline, emb: c.emb, clf, vals };
+    })
+    .filter(Boolean);
 }
 
 function renderAblation() {
-  const cell = {};
-  const groups = [];
-  for (const r of focusedResults()) {
-    const k = `${r.Pipeline}|${r.Embeddings}`;
-    if (!groups.some((g) => g.key === k)) groups.push({ key: k, pipeline: r.Pipeline, emb: r.Embeddings });
-    const ck = `${k}|${r.Mode}`;
-    if (cell[ck] === undefined || r["ROC-AUC"] > cell[ck]) cell[ck] = r["ROC-AUC"];
-  }
+  const box = $("#ablation-chart");
   const modes = STATE ? STATE.modes : ["normal", "user_intent_only", "context_only"];
-  const { w, pad, right, bar, gap, group, top } = AB_GEO;
+  const groups = AB_GROUPS = ablationGroups(modes);
+  if (!groups.length) {
+    box.innerHTML = `<span class="muted">No normal-mode runs to anchor the ablation on.</span>`;
+    return;
+  }
+  // drawn at the card's real width, so 1 SVG unit = 1 CSS px and text never scales
+  const w = Math.max(560, Math.round(box.clientWidth || 900));
+  AB_W = box.clientWidth;
+  const { pad, right, bar, gap, group, sep, top } = AB_GEO;
   const plot = w - pad - right;
-  const rowH = modes.length * bar + (modes.length - 1) * gap + group;
-  const h = top + groups.length * rowH + 8;
-  // 0.5 -> 0, 1.0 -> full width; a sub-chance value clamps but still prints exactly
-  const x = (v) => pad + Math.max(0, Math.min(1, (v - 0.5) / 0.5)) * plot;
+  const block = modes.length * bar + (modes.length - 1) * gap;
 
-  const ticks = [0.5, 0.75, 1].map((t) => `
-    <line x1="${x(t)}" y1="${top - 8}" x2="${x(t)}" y2="${h - 8}" class="ab-grid"/>
-    <text x="${x(t)}" y="${top - 12}" class="ab-tick" text-anchor="middle">${t === 0.5 ? "0.50 chance" : t.toFixed(2)}</text>`).join("");
+  const ys = [];
+  let y = top;
+  groups.forEach((g, i) => {
+    if (i && g.pipeline !== groups[i - 1].pipeline) y += sep;
+    ys.push(y);
+    y += block + group;
+  });
+  const h = y - group + 14;
 
-  let body = "";
+  const seen = groups.flatMap((g) => modes.map((m) => g.vals[m])).filter((v) => typeof v === "number");
+  const lo = Math.min(0.5, Math.floor((Math.min(...seen) - 0.05) * 10) / 10);
+  const x = (v) => pad + (Math.max(lo, Math.min(1, v)) - lo) / (1 - lo) * plot;
+  const base = x(0.5);
+
+  let grid = "";
+  for (let i = Math.round(lo * 10); i <= 10; i++) {
+    const t = i / 10;
+    grid += `<line x1="${x(t)}" y1="${top - 8}" x2="${x(t)}" y2="${h - 6}" class="${t === 0.5 ? "ab-chance" : "ab-grid"}"/>
+      <text x="${x(t)}" y="${top - 14}" class="ab-tick${t === 0.5 ? " ab-tick-chance" : ""}" text-anchor="middle">${t === 0.5 ? "0.50 chance" : t.toFixed(1)}</text>`;
+  }
+
+  let hits = "", seps = "", body = "";
   groups.forEach((g, gi) => {
-    const y0 = top + gi * rowH;
-    const mid = y0 + (modes.length * bar + (modes.length - 1) * gap) / 2 + 4;
-    body += `<text x="${pad - 10}" y="${mid}" class="ab-label" text-anchor="end">${esc(pShort(g.pipeline))} · ${esc(g.emb)}</text>`;
+    const y0 = ys[gi];
+    if (gi && g.pipeline !== groups[gi - 1].pipeline) {
+      const sy = (ys[gi - 1] + block + y0) / 2;
+      seps += `<line x1="0" y1="${sy}" x2="${w}" y2="${sy}" class="ab-sep"/>`;
+    }
+    hits += `<rect x="0" y="${y0 - group / 2 + 2}" width="${w}" height="${block + group - 4}" rx="6" class="ab-hit" data-i="${gi}"/>`;
+    // two lines: the configuration, then the classifier under it (short name, as in the table)
+    body += `<text x="${pad - 12}" y="${y0 + block / 2 - 3}" class="ab-label" text-anchor="end">${esc(pShort(g.pipeline))} · ${esc(g.emb)}</text>
+      <text x="${pad - 12}" y="${y0 + block / 2 + 14}" class="ab-clf" text-anchor="end">${esc(CLF_SHORT[g.clf] || g.clf)}</text>`;
     modes.forEach((m, mi) => {
-      const v = cell[`${g.key}|${m}`];
-      const y = y0 + mi * (bar + gap);
-      if (v === undefined) {
-        body += `<text x="${pad + 4}" y="${y + bar - 1}" class="ab-val ab-none">no run</text>`;
+      const v = g.vals[m];
+      const by = y0 + mi * (bar + gap);
+      const ty = by + bar / 2 + 4.5;
+      if (typeof v !== "number") {
+        body += `<text x="${base + 6}" y="${ty}" class="ab-val ab-none">no run</text>`;
         return;
       }
-      const bw = x(v) - pad;
-      body += `<path d="${barPath(pad, y, bw, bar)}" fill="${MODE_HUE[m]}">
-          <title>${esc(pLabel(g.pipeline))} · ${esc(g.emb)} · ${MODE_SHORT[m]} — ROC-AUC ${fmt(v)}</title></path>
-        <text x="${x(v) + 6}" y="${y + bar - 1}" class="ab-val">${fmt(v)}</text>`;
+      const xv = x(v);
+      body += `<path d="${barPath(base, xv, by, bar)}" fill="${MODE_HUE[m]}"/>`;
+      body += v >= 0.5
+        ? `<text x="${xv + 7}" y="${ty}" class="ab-val">${fmt(v)}</text>`
+        : `<text x="${xv - 7}" y="${ty}" class="ab-val" text-anchor="end">${fmt(v)}</text>`;
     });
   });
 
   const legend = modes.map((m) =>
     `<span class="ab-key"><i style="background:${MODE_HUE[m]}"></i>${MODE_SHORT[m]}</span>`).join("");
 
-  $("#ablation-chart").innerHTML = `<div class="ab-legend">${legend}</div>
-    <svg viewBox="0 0 ${w} ${h}" class="ab-svg" role="img"
-      aria-label="Best ROC-AUC per pipeline and embedding, one bar per ablation mode">
-      ${ticks}${body}
-    </svg>`;
+  box.innerHTML = `<div class="ab-legend">${legend}
+      <span class="ab-note">each group is the classifier shown in Master results, so bar gaps equal its Δ</span></div>
+    <svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" class="ab-svg" role="img"
+      aria-label="ROC-AUC per pipeline and embedding for the Master-results classifier, one bar per ablation mode">
+      ${hits}${grid}${seps}${body}
+    </svg>
+    <div class="ab-tip" hidden></div>`;
+
+  const tip = box.querySelector(".ab-tip");
+  box.querySelectorAll(".ab-hit").forEach((r) => {
+    r.addEventListener("mouseenter", () => {
+      tip.innerHTML = abTipHTML(AB_GROUPS[+r.dataset.i], modes);
+      tip.hidden = false;
+    });
+    r.addEventListener("mousemove", (e) => {
+      const b = box.getBoundingClientRect();
+      const mx = e.clientX - b.left, my = e.clientY - b.top;
+      const tw = tip.offsetWidth;
+      tip.style.left = `${mx + 16 + tw > b.width ? mx - tw - 16 : mx + 16}px`;
+      tip.style.top = `${my + 16}px`;
+    });
+    r.addEventListener("mouseleave", () => { tip.hidden = true; });
+  });
 }
+
+/* Hover card: the whole group at once — which model, all three scores, and the
+   Δ against normal exactly as the table computes it (normal − ablated, in pp). */
+function abTipHTML(g, modes) {
+  const ref = g.vals.normal;
+  const rows = modes.map((m) => {
+    const v = g.vals[m];
+    const has = typeof v === "number";
+    const d = m !== "normal" && has && typeof ref === "number" ? (ref - v) * 100 : null;
+    return `<tr>
+      <td><i style="background:${MODE_HUE[m]}"></i>${MODE_SHORT[m]}</td>
+      <td class="num">${has ? fmt(v) : "no run"}</td>
+      <td class="num tip-d">${d === null ? "" : `Δ ${d >= 0 ? "+" : "−"}${Math.abs(d).toFixed(2)} pp`}</td>
+      <td class="tip-flag">${has && v < 0.5 ? "below chance" : ""}</td></tr>`;
+  }).join("");
+  return `<div class="tip-h">${esc(pLabel(g.pipeline))}</div>
+    <div class="tip-sub">${esc(g.emb)} · ${esc(g.clf)} · ROC-AUC</div>
+    <table>${rows}</table>`;
+}
+
+// the chart is drawn to the card's width, so redraw when that width changes
+new ResizeObserver(() => {
+  const w = $("#ablation-chart").clientWidth;
+  if (w && RESULTS.length && Math.abs(w - AB_W) > 4) renderAblation();
+}).observe($("#ablation-chart"));
 
 function fillResultFilters() {
   const fill = (id, values, labelFn = (x) => x) => {
@@ -745,7 +849,7 @@ function renderResultsTable() {
       return `<td class="num">${fmt(v, c.includes("Time") ? 3 : 4)}${c === "ROC-AUC" ? microbar(v) : ""}</td>`;
     }
     if (c === "Pipeline") return `<td title="${esc(pLabel(v))}">${esc(pShort(v))}</td>`;
-    if (c === "Mode") return `<td>${MODE_SHORT[v]}${isShortcut(r) ? SHORTCUT_CHIP : ""}</td>`;
+    if (c === "Mode") return `<td>${MODE_SHORT[v]}</td>`;
     return `<td>${esc(v)}</td>`;
   }).join("")}</tr>`).join("");
   $("#results-table").innerHTML = `<tr>${header}</tr>${body}`;
@@ -756,33 +860,130 @@ function renderResultsTable() {
   }));
 }
 
-/* -------- figures -------- */
-function fillFigRunSelect() {
-  const runsWithFigs = (STATE ? STATE.runs : []).filter((r) => r.figures.length);
-  const el = $("#fig-run");
-  const cur = el.value;
-  el.innerHTML = runsWithFigs.map((r) =>
-    `<option value="${r.pipeline}|${r.mode}">${pShort(r.pipeline)} / ${MODE_SHORT[r.mode]}</option>`).join("");
-  if ([...el.options].some((o) => o.value === cur)) el.value = cur;
+/* -------- figures --------
+   Two button rows pick the run (pipeline × mode). The pipeline buttons only
+   offer pipelines selected in the Focus filter, so Figures follows it like
+   every other card. The run's figures lay out as the summary on top, then one
+   row per embedding with the same figure type in each column. */
+let FIG_SEL = { pipeline: null, mode: "normal" };
+
+// column order, label, and the PNGs' aspect ratio (width / height): each column
+// is as wide as its figure's shape, so the three images in a row share a height
+const FIG_TYPES = [
+  ["confusion_matrices", "Confusion matrices", 4.78],
+  ["dimensionality_reduction", "Dimensionality reduction", 2.98],
+  ["roc_pr_curves", "ROC / PR curves", 2.31],
+];
+const FIG_TYPE_RE = new RegExp(`^(.+?)_(${FIG_TYPES.map((t) => t[0]).join("|")})\\.png$`);
+
+const figRuns = () => (STATE ? STATE.runs : []).filter((r) => r.figures.length && PIPE_FOCUS.has(r.pipeline));
+
+function renderFigPicker() {
+  const runs = figRuns();
+  const pipes = ALL_PIPES.filter((p) => runs.some((r) => r.pipeline === p));
+  if (!pipes.includes(FIG_SEL.pipeline)) FIG_SEL.pipeline = pipes[0] || null;
+  const modes = STATE ? STATE.modes : ["normal", "user_intent_only", "context_only"];
+  const has = (m) => runs.some((r) => r.pipeline === FIG_SEL.pipeline && r.mode === m);
+  if (!has(FIG_SEL.mode)) FIG_SEL.mode = modes.find(has) || FIG_SEL.mode;
+
+  $("#fig-pipes").innerHTML = pipes.map((p) =>
+    `<button class="pipe-chip ${p === FIG_SEL.pipeline ? "sel" : ""}" data-pipe="${p}" title="${esc(pLabel(p))}">${pShort(p)}</button>`).join("");
+  $("#fig-modes").innerHTML = modes.map((m) =>
+    `<button class="pipe-chip ${m === FIG_SEL.mode ? "sel" : ""}" data-mode="${m}"${has(m) ? "" : " disabled"}>${MODE_SHORT[m]}</button>`).join("");
   renderFigures();
 }
-$("#fig-run").addEventListener("change", renderFigures);
+
+$("#fig-pipes").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-pipe]");
+  if (b) { FIG_SEL.pipeline = b.dataset.pipe; renderFigPicker(); }
+});
+$("#fig-modes").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-mode]");
+  if (b && !b.disabled) { FIG_SEL.mode = b.dataset.mode; renderFigPicker(); }
+});
 
 function renderFigures() {
-  const sel = $("#fig-run").value;
   const el = $("#figures-list");
-  if (!sel) { el.innerHTML = `<span class="muted">No run has figures yet.</span>`; return; }
-  const [pipeline, mode] = sel.split("|");
-  const run = (STATE ? STATE.runs : []).find((r) => r.pipeline === pipeline && r.mode === mode);
-  if (!run || !run.figures.length) {
-    el.innerHTML = `<span class="muted">No figures for this run.</span>`;
-    return;
+  const { pipeline, mode } = FIG_SEL;
+  const run = figRuns().find((r) => r.pipeline === pipeline && r.mode === mode);
+  if (!run) { el.innerHTML = `<span class="muted">No run has figures yet.</span>`; return; }
+
+  const url = (f) => `/api/figure?pipeline=${pipeline}&mode=${mode}&name=${encodeURIComponent(f)}`;
+  let n = 0;   // viewer order = reading order
+  const fig = (f, style = "") => `<figure${style}><a href="${url(f)}" target="_blank" data-i="${n++}" data-name="${esc(f)}">
+      <img loading="lazy" src="${url(f)}" alt="${esc(f)}"></a></figure>`;
+
+  const files = new Set(run.figures);
+  const used = new Set();
+  const embs = [...new Set(run.figures.map((f) => (f.match(FIG_TYPE_RE) || [])[1]).filter(Boolean))].sort();
+
+  let html = "";
+  if (files.has("performance_summary.png")) {
+    used.add("performance_summary.png");
+    html += `<div class="fig-summary">${fig("performance_summary.png")}</div>`;
   }
-  el.innerHTML = run.figures.map((f) =>
-    `<figure><a href="/api/figure?pipeline=${pipeline}&mode=${mode}&name=${encodeURIComponent(f)}" target="_blank">
-      <img loading="lazy" src="/api/figure?pipeline=${pipeline}&mode=${mode}&name=${encodeURIComponent(f)}"></a>
-      <figcaption>${esc(f)}</figcaption></figure>`).join("");
+  if (embs.length) {
+    const flex = (a) => ` style="flex: ${a} 1 0"`;
+    html += `<div class="fig-row fig-head"><div class="fig-emb"></div><div class="fig-cells">
+      ${FIG_TYPES.map(([, label, a]) => `<div${flex(a)}>${label}</div>`).join("")}</div></div>`;
+    for (const emb of embs) {
+      const cells = FIG_TYPES.map(([type, , a]) => {
+        const f = `${emb}_${type}.png`;
+        if (!files.has(f)) return `<div class="fig-missing" style="flex: ${a} 1 0; aspect-ratio: ${a}">not generated</div>`;
+        used.add(f);
+        return fig(f, flex(a));
+      }).join("");
+      html += `<div class="fig-row fig-emb-row"><div class="fig-emb">${esc(emb.toUpperCase())}</div>
+        <div class="fig-cells">${cells}</div></div>`;
+    }
+  }
+  // anything that fits neither slot still shows, rather than silently vanishing
+  const rest = run.figures.filter((f) => !used.has(f));
+  if (rest.length) {
+    html += `<div class="fig-rest">${rest.map((f) => `<div>${fig(f)}<div class="fig-cap">${esc(f)}</div></div>`).join("")}</div>`;
+  }
+  el.innerHTML = html;
 }
+
+/* -------- figure viewer --------
+   A plain click opens the figure in a dialog over the page; ctrl/shift/middle
+   click keeps the link's normal open-in-new-tab behaviour. ← → walk the run. */
+let FIG_LIST = [], FIG_I = 0;
+
+$("#figures-list").addEventListener("click", (e) => {
+  const a = e.target.closest("a[data-i]");
+  if (!a || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  e.preventDefault();
+  FIG_LIST = $$("#figures-list a[data-i]").map((x) => ({ href: x.href, name: x.dataset.name }));
+  showFig(+a.dataset.i);
+});
+
+function showFig(i) {
+  const n = FIG_LIST.length;
+  if (!n) return;
+  FIG_I = (i + n) % n;
+  const f = FIG_LIST[FIG_I];
+  $("#fig-img").src = f.href;
+  $("#fig-img").alt = f.name;
+  $("#fig-title").textContent = `${pShort(FIG_SEL.pipeline)} / ${MODE_SHORT[FIG_SEL.mode]}  ·  ${f.name}`;
+  $("#fig-count").textContent = `${FIG_I + 1} / ${n}`;
+  $("#fig-open").href = f.href;
+  $("#fig-prev").hidden = $("#fig-next").hidden = n < 2;
+  const dlg = $("#fig-dlg");
+  if (!dlg.open) dlg.showModal();
+}
+
+$("#fig-prev").addEventListener("click", () => showFig(FIG_I - 1));
+$("#fig-next").addEventListener("click", () => showFig(FIG_I + 1));
+$("#fig-close").addEventListener("click", () => $("#fig-dlg").close());
+$("#fig-dlg").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowLeft") { e.preventDefault(); showFig(FIG_I - 1); }
+  if (e.key === "ArrowRight") { e.preventDefault(); showFig(FIG_I + 1); }
+});
+/* the backdrop and the empty stage around the image both close it */
+$("#fig-dlg").addEventListener("click", (e) => {
+  if (e.target === $("#fig-dlg") || e.target.classList.contains("fig-stage")) $("#fig-dlg").close();
+});
 
 /* ================= detect tab ================= */
 /* A saved model is keyed by pipeline × mode × emb × clf, but this tab exposes

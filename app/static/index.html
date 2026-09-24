@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>thesis_clean dashboard</title>
-<link rel="stylesheet" href="/static/style.css?v=29">
+<link rel="stylesheet" href="/static/style.css?v=39">
 </head>
 <body>
 <header>
@@ -139,7 +139,6 @@
         <option value="best" selected>best per pipeline × embedding</option>
         <option value="all">every classifier</option>
       </select></label>
-      <label class="chip-toggle"><input type="checkbox" id="ms-cost"><span>cost columns</span></label>
       <button class="btn small" id="ms-copy">Copy as CSV</button>
       <span class="msg" id="ms-msg"></span>
     </div>
@@ -149,7 +148,8 @@
       <p class="muted note">Δ is absolute degradation in percentage points: reference − ablated,
         so positive means the ablation <b>hurt</b>. A non-positive Δ on intent-only means the
         classes separate without the injection — a corpus shortcut, not detection.
-        <b>p</b> is a paired McNemar test (Holm-corrected) on the same frozen test rows.</p>
+        <b>ns</b> marks a Δ whose paired McNemar test (Holm-corrected, same frozen test rows)
+        is not significant; hover any Δ for its exact <b>p</b>.</p>
     </details>
   </div>
 
@@ -172,8 +172,9 @@
 
   <div class="card" id="figures-card">
     <h2>Figures</h2>
-    <div class="row wrap gap">
-      <label class="field"><span>Run</span><select id="fig-run"></select></label>
+    <div class="fig-pick">
+      <div class="grp"><span class="lbl">Pipeline</span><div id="fig-pipes" class="grp"></div></div>
+      <div class="grp"><span class="lbl">Mode</span><div id="fig-modes" class="grp"></div></div>
     </div>
     <div id="figures-list" class="figures"></div>
   </div>
@@ -248,6 +249,25 @@
   <div id="peek-body"></div>
 </dialog>
 
-<script src="/static/app.js?v=28"></script>
+<!-- figure viewer: a figure opens here instead of a new tab; ← → step through the run -->
+<!-- autofocus on the dialog itself: otherwise showModal() focuses the first link
+     and the "open in new tab" button opens already outlined -->
+<dialog id="fig-dlg" aria-label="Figure viewer" autofocus>
+  <header>
+    <h3 id="fig-title"></h3>
+    <span class="fig-count" id="fig-count"></span>
+    <a class="ghost" id="fig-open" target="_blank" rel="noopener">open in new tab ↗</a>
+    <button class="ghost" id="fig-close" aria-label="Close figure">&#10005;</button>
+  </header>
+  <div class="fig-stage">
+    <button class="fig-nav prev" id="fig-prev" aria-label="Previous figure">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg></button>
+    <img id="fig-img" alt="">
+    <button class="fig-nav next" id="fig-next" aria-label="Next figure">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg></button>
+  </div>
+</dialog>
+
+<script src="/static/app.js?v=36"></script>
 </body>
 </html>
