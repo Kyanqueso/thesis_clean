@@ -1094,7 +1094,9 @@ $("#d-file").addEventListener("change", async (event) => {
   status.className = "msg";
   status.textContent = "Reading file…";
   try {
-    if (!/\.txt$/i.test(file.name)) throw new Error("Choose a .txt text file.");
+    if (!/\.(txt|html|json|jsonl|csv|tsv|py|js)$/i.test(file.name)) {
+      throw new Error("Choose a .txt, .html, .json, .jsonl, .csv, .tsv, .py, or .js text file.");
+    }
     if (file.size > 1024 * 1024) throw new Error("Choose a text file no larger than 1 MB.");
     let text;
     try {
