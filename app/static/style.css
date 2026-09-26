@@ -491,15 +491,16 @@ details.adv[open] > summary::before { content: "▾"; }
 }
 .d-input { font: inherit; font-size: 16px; color: var(--text); padding: 16px 18px; }
 .d-input:focus { outline: none; border-color: var(--accent); }
-.d-box { position: relative; padding: 16px 18px 56px; }
+.d-box { position: relative; padding: 16px 18px 12px; }
 .d-box:focus-within { border-color: var(--accent); }
 .d-box textarea {
   width: 100%; padding: 0; border: none; background: none; resize: vertical;
   color: var(--text); font: 14px/1.6 var(--mono);
 }
 .d-box textarea:focus { outline: none; }
-/* docked in the box's bottom gutter — the padding above reserves the room */
-.d-tools { position: absolute; right: 14px; bottom: 12px; display: flex; gap: 8px; }
+.d-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; }
+#b-upload { margin-right: auto; }
+#d-file-status:not(:empty) { margin-bottom: 16px; }
 .d-select {
   font: inherit; font-size: 13px; color: var(--ink-2); background: var(--card2);
   border: 1px solid var(--border); border-radius: 999px; padding: 5px 12px;

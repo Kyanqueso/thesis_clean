@@ -188,13 +188,16 @@
     <input id="d-intent" class="d-input" placeholder="Enter intent here">
 
     <div class="d-box">
-      <textarea id="d-context" rows="10" placeholder="Paste external context here"></textarea>
+      <textarea id="d-context" rows="10" placeholder="Paste external context here or upload file"></textarea>
       <div class="d-tools">
+        <input id="d-file" type="file" accept=".txt,text/plain" hidden>
+        <button class="btn small" id="b-upload" type="button" title="Load a UTF-8 .txt file (up to 1 MB) into the context box" aria-describedby="d-file-status">Upload file</button>
         <button class="btn small" id="b-sample" title="Fill both fields from a random labeled dataset row">random row</button>
         <select id="d-emb" class="d-select" title="Embedding model"></select>
         <select id="d-clf" class="d-select" title="Classifier"></select>
       </div>
     </div>
+    <div class="msg" id="d-file-status" role="status" aria-live="polite"></div>
 
     <button class="detect-btn" id="b-detect">Detect</button>
     <div class="d-note msg" id="detect-msg"></div>

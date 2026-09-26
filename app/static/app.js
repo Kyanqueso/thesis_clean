@@ -1083,6 +1083,40 @@ async function loadDetectOptions() {
 }
 $("#d-emb").addEventListener("change", fillClf);
 
+$("#b-upload").addEventListener("click", () => $("#d-file").click());
+$("#d-file").addEventListener("change", async (event) => {
+  const input = event.target, file = input.files[0];
+  if (!file) return;
+  const status = $("#d-file-status");
+  const controls = [input, $("#b-upload"), $("#d-context"), $("#b-detect"), $("#b-sample")];
+  const disabled = controls.map((control) => control.disabled);
+  controls.forEach((control) => { control.disabled = true; });
+  status.className = "msg";
+  status.textContent = "Reading file…";
+  try {
+    if (!/\.txt$/i.test(file.name)) throw new Error("Choose a .txt text file.");
+    if (file.size > 1024 * 1024) throw new Error("Choose a text file no larger than 1 MB.");
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+    } catch {
+      throw new Error("Could not read this file as UTF-8 text. Save it as UTF-8 and try again.");
+    }
+    if (/[\x00-\x08\x0e-\x1f]/.test(text)) throw new Error("This file contains binary data. Choose a plain text file.");
+    if (!text.trim()) throw new Error("This text file is empty.");
+    $("#d-context").value = text;
+    $("#d-context").dispatchEvent(new Event("input"));
+    $("#detect-msg").textContent = "";
+    status.textContent = `Loaded ${file.name}. Review the context above, then click Detect.`;
+  } catch (error) {
+    status.className = "msg error";
+    status.textContent = error.message;
+  } finally {
+    input.value = "";
+    controls.forEach((control, i) => { control.disabled = disabled[i]; });
+  }
+});
+
 $("#b-sample").addEventListener("click", async () => {
   const msg = $("#detect-msg");
   msg.textContent = "sampling…"; msg.className = "d-note msg";
@@ -1092,6 +1126,7 @@ $("#b-sample").addEventListener("click", async () => {
     $("#d-intent").value = row.user_intent || "";
     $("#d-context").value = row.context || "";
     $("#d-context").dataset.truth = row.label;
+    $("#d-file-status").textContent = "";
     msg.textContent = "loaded a labeled row — ground truth stays hidden until you detect";
   } catch (e) { msg.textContent = e.message; msg.className = "d-note msg warn"; }
 });
@@ -1126,6 +1161,7 @@ $("#b-detect").addEventListener("click", async () => {
 
 // editing either field invalidates the verdict sitting on the button
 ["#d-intent", "#d-context"].forEach((id) => $(id).addEventListener("input", () => {
+  $("#d-file-status").textContent = "";
   delete $("#d-context").dataset.truth;
   $("#detect-detail").textContent = "";
   setBtn("", "Detect");
