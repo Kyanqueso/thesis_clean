@@ -121,6 +121,32 @@ const fmt = (x, d = 4) => (typeof x === "number" ? x.toFixed(d) : x ?? "");
 const pLabel = (p) => (STATE && STATE.pipelines[p]) || p;
 const pShort = (p) => p.replace("pipeline", "P").split("_")[0];
 
+/* One floating tooltip for anything carrying data-tip. The browser's own title
+   tooltip waits ~1s, is tiny and unstyled; this one shows at once, allows line
+   breaks, and is position:fixed so a scrolling table cannot clip it. */
+const TIP = document.createElement("div");
+TIP.className = "tip";
+TIP.hidden = true;
+document.body.appendChild(TIP);
+let tipFor = null;
+
+document.addEventListener("mouseover", (e) => {
+  const el = e.target.closest ? e.target.closest("[data-tip]") : null;
+  if (el === tipFor) return;
+  tipFor = el;
+  if (!el) { TIP.hidden = true; return; }
+  TIP.textContent = el.dataset.tip;
+  TIP.hidden = false;
+  const r = el.getBoundingClientRect(), t = TIP.getBoundingClientRect();
+  const left = Math.max(8, Math.min(innerWidth - t.width - 8, r.left + r.width / 2 - t.width / 2));
+  const top = r.bottom + 8 + t.height > innerHeight - 8 ? r.top - t.height - 8 : r.bottom + 8;
+  TIP.style.left = `${left}px`;
+  TIP.style.top = `${top}px`;
+});
+const hideTip = () => { TIP.hidden = true; tipFor = null; };
+document.addEventListener("mouseleave", hideTip);
+window.addEventListener("scroll", hideTip, true);
+
 /* ================= tabs ================= */
 $$(".tab-btn").forEach((b) => b.addEventListener("click", () => {
   $$(".tab-btn").forEach((x) => x.classList.toggle("active", x === b));
@@ -538,6 +564,43 @@ const MASTER_COST = [
 // the one long classifier name sets the column width for every row
 const CLF_SHORT = { LogisticRegression: "LogReg" };
 
+/* Header hover text for Master results: what each column is and how it is
+   computed. Replaces the collapsed "How to read Δ and p" paragraph. */
+const MODE_DESC = {
+  normal: "The model sees both the intent and the context, as trained.",
+  user_intent_only: "The model sees only the intent. The context, where the injection sits, is removed.",
+  context_only: "The model sees only the context. The intent is removed.",
+};
+const COL_TIP = {
+  "Pipeline": "How the dataset was built: P1 Alamsabi, P2 organic + BIPIA, P3 organic self-injected.\nHover a row's P1 / P2 / P3 for its full name.",
+  "Emb": "The embedding model that turns the text into vectors before classification.",
+  "Accuracy": "Accuracy: share of test rows classified correctly.\n(TP + TN) / all rows, at the 0.5 threshold.",
+  "Precision": "Precision: of the rows flagged malicious, the share that really are.\nTP / (TP + FP), at the 0.5 threshold.",
+  "Recall": "Recall: of the malicious rows, the share that got flagged.\nTP / (TP + FN), at the 0.5 threshold.",
+  "F1-Score": "F1: one number balancing precision and recall.\n2 × P × R / (P + R), at the 0.5 threshold.",
+  "ROC-AUC": "ROC-AUC: chance that a random malicious row scores higher than a random benign one.\n0.5 = guessing, 1.0 = perfect. Uses no threshold.",
+  "PR-AUC": "PR-AUC: area under the precision–recall curve (average precision).\nUses no threshold. On a balanced test set, guessing scores about 0.5.",
+  "FPR": "False-positive rate: share of benign rows wrongly flagged as malicious.\nFP / (FP + TN), at the 0.5 threshold.",
+  "FNR": "False-negative rate: share of malicious rows missed.\nFN / (FN + TP), at the 0.5 threshold.",
+  "Latency-P50(ms)": "Median time for the classifier to score one row, in milliseconds.",
+  "Latency-P99(ms)": "99th-percentile time to score one row, in milliseconds: the slow tail.",
+  "Train-Time(s)": "Time to train the classifier, in seconds.",
+  "Train-PeakRSS(MB)": "Peak memory while training, in MB.\nReads 0 for many runs, so treat it as unreliable.",
+  "Train-PeakVRAM(MB)": "Peak GPU memory while training, in MB.",
+};
+
+const SIG_NOTE = "ns = not statistically significant: McNemar test, Holm-corrected, p ≥ 0.05.\n"
+  + "McNemar compares which rows each model gets right at the 0.5 threshold, so it tests accuracy, not the Δ's metric.";
+
+function deltaTip(v, ref) {
+  let t = `${MODE_DESC[v]}\nΔ = ${MODE_SHORT[ref]} − ${MODE_SHORT[v]}, in percentage points. Positive = removing it hurt.`;
+  if (ref === "normal" && v === "user_intent_only")
+    t += "\nRed (≤ 0.5 pp): the intent alone does as well as the full input, so the model is not using the injection. That is a shortcut.";
+  if (ref === "normal" && v === "context_only")
+    t += "\nNear zero is the healthy result: the signal is in the context.";
+  return `${t}\n${SIG_NOTE}`;
+}
+
 // the shared fmt() renders a missing value as blank; in this grid a blank cell
 // reads as "zero", so absent metrics get an explicit em dash instead
 const mfmt = (x, d = 4) => (typeof x === "number" ? x.toFixed(d) : "—");
@@ -587,7 +650,7 @@ function degCell(value, sig, variant, p) {
   const alarm = variant === "user_intent_only";
   const cls = pp > 0.5 ? "deg-pos" : (alarm ? "deg-neg" : "deg-quiet");
   const mark = sig === false ? " ns" : "";
-  return `<td class="num ${cls}" title="${esc(pTitle(p, sig))}">${pp >= 0 ? "+" : ""}${pp.toFixed(2)}<span class="ns">${mark}</span></td>`;
+  return `<td class="num ${cls}" data-tip="${esc(pTitle(p, sig))}">${pp >= 0 ? "+" : ""}${pp.toFixed(2)}<span class="ns">${mark}</span></td>`;
 }
 
 // p is Holm-corrected; at n≈14k it underflows to exactly 0, which toExponential
@@ -615,20 +678,31 @@ function renderMaster() {
   const qShort = { "Accuracy": "Acc", "Precision": "Prec", "Recall": "Rec",
                    "F1-Score": "F1", "ROC-AUC": "ROC-AUC", "PR-AUC": "PR-AUC" };
 
-  // two-tier header: group band on top, columns beneath
-  const band = (n, label) => (n ? `<th colspan="${n}">${label}</th>` : "");
+  const ref = MASTER.reference;
+  const refName = MODE_SHORT[ref];
+  const tipAttr = (tip) => ` data-tip="${esc(tip)}"`;
+  const th = (label, tip, cls = "") => `<th${cls ? ` class="${cls}"` : ""}${tipAttr(tip)}>${label}</th>`;
+  const clfTip = $("#ms-collapse").value === "best"
+    ? `The classifier with the best ROC-AUC in the ${refName} run, for this pipeline × embedding.`
+    : "Each classifier trained on these embeddings, one row each.";
+
+  // two-tier header: group band on top, columns beneath; every header explains itself on hover
+  const band = (n, label, tip) => (n ? `<th colspan="${n}"${tipAttr(tip)}>${label}</th>` : "");
   let head = `<tr class="grp">
-    <th colspan="3">Configuration</th>
-    ${band(q.length, `Detection — ${esc(MODE_SHORT[MASTER.reference])}`)}
-    ${band(errs.length, "Errors")}
-    ${band(degVars.length, `Ablation Δ ${esc(metric)} (pp)`)}
-    ${band(cost.length, "Cost")}
+    ${band(3, "Configuration", "Which run the row describes.")}
+    ${band(q.length, `Detection — ${esc(refName)}`,
+      `How well the ${refName} run detects injections.\nThreshold metrics use 0.5; ROC-AUC and PR-AUC use no threshold.`)}
+    ${band(errs.length, "Errors", "The two ways to be wrong: flagging benign rows (FPR) and missing malicious ones (FNR).")}
+    ${band(degVars.length, `Ablation Δ ${esc(metric)} (pp)`,
+      `How much ${metric} drops when part of the input is removed: ${refName} − ablated, in percentage points.\n`
+      + `Positive = removing it hurt.\n${SIG_NOTE}`)}
+    ${band(cost.length, "Cost", "Speed and memory of the classifier.")}
     </tr>`;
-  head += `<tr><th>Pipeline</th><th>Emb</th><th>Classifier</th>
-    ${q.map((m) => `<th class="num">${qShort[m]}</th>`).join("")}
-    ${errs.map((e) => `<th class="num">${e}</th>`).join("")}
-    ${degVars.map((v) => `<th class="num">→${MODE_SHORT[v]}</th>`).join("")}
-    ${cost.map(([, l]) => `<th class="num">${l}</th>`).join("")}
+  head += `<tr>${th("Pipeline", COL_TIP.Pipeline)}${th("Emb", COL_TIP.Emb)}${th("Classifier", clfTip)}
+    ${q.map((m) => th(qShort[m], COL_TIP[m], "num")).join("")}
+    ${errs.map((e) => th(e, COL_TIP[e], "num")).join("")}
+    ${degVars.map((v) => th(`→${MODE_SHORT[v]}`, deltaTip(v, ref), "num")).join("")}
+    ${cost.map(([k, l]) => th(l, COL_TIP[k], "num")).join("")}
     </tr>`;
 
   let body = "", lastPipe = null;
@@ -638,9 +712,9 @@ function renderMaster() {
     // no shortcut chip here: the verdict cards name the pipeline and the red
     // intent-only Δ marks the row, so a chip column only cost width
     body += `<tr class="${sep}">
-      <td title="${esc(pLabel(r.Pipeline))}">${esc(pShort(r.Pipeline))}</td>
+      <td${tipAttr(pLabel(r.Pipeline))}>${esc(pShort(r.Pipeline))}</td>
       <td>${esc(r.Embeddings)}</td>
-      <td title="${esc(r.Classifier)}">${esc(CLF_SHORT[r.Classifier] || r.Classifier)}</td>
+      <td${CLF_SHORT[r.Classifier] ? tipAttr(r.Classifier) : ""}>${esc(CLF_SHORT[r.Classifier] || r.Classifier)}</td>
       ${q.map((m) => `<td class="num">${mfmt(r[m])}</td>`).join("")}
       ${errs.map((e) => `<td class="num">${mfmt(r[e])}</td>`).join("")}
       ${degVars.map((v) => degCell(r[`Deg:${v}:${metric}`], r[`Sig:${v}:significant`], v, r[`Sig:${v}:p_holm`])).join("")}
@@ -648,6 +722,14 @@ function renderMaster() {
       </tr>`;
   }
   $("#master-table").innerHTML = head + body;
+
+  // the always-visible key that replaced the collapsed "How to read Δ and p"
+  $("#master-key").innerHTML = degVars.length ? `
+    <span>Δ = ${esc(refName)} − ablated, in pp · positive = removing it hurt</span>
+    ${degVars.includes("user_intent_only") && ref === "normal"
+      ? `<span><b class="key-bad">red</b> = intent-only Δ ≤ 0.5 pp: the intent alone is enough → shortcut</span>` : ""}
+    <span><span class="ns">ns</span> = not significant (McNemar, Holm, p ≥ 0.05)</span>
+    <span class="key-hint">hover a header or a Δ for details</span>` : "";
 
   const notes = MASTER.notes || [];
   $("#master-notes").innerHTML = notes.length
@@ -688,9 +770,48 @@ $("#ms-copy").addEventListener("click", async () => {
    Bars grow out of the 0.50 chance line: right = better than guessing, left =
    worse. The axis only extends below 0.50 when some bar actually goes there. */
 const MODE_HUE = { normal: "var(--m-normal)", user_intent_only: "var(--m-intent)", context_only: "var(--m-context)" };
-const AB_GEO = { pad: 120, right: 66, bar: 18, gap: 4, group: 26, sep: 22, top: 34 };
+const AB_GEO = { pad: 120, right: 66, bar: 18, gap: 4, group: 26, sep: 22, subsep: 10, top: 34 };
+// "All" draws up to 45 groups; thinner bars keep that from running thousands of px
+const AB_DENSE = { bar: 12, gap: 3, group: 20 };
 let AB_GROUPS = [];   // what the chart drew, for the hover card
 let AB_W = 0;         // width it was drawn at, so a resize can redraw
+
+/* Which groups to draw. Classifier: "best" = the Master-results pick (default),
+   "all" = every classifier, or one classifier by name. Embeddings toggle like the
+   Focus chips, keeping at least one on. Pipelines come from the Focus chips —
+   a second pipeline control here could disagree with them. */
+let AB_CLF = "best";
+const AB_EMB_OFF = new Set();
+
+function renderAbPicker() {
+  const rows = focusedResults();
+  const clfs = [...new Set(rows.map((r) => r.Classifier))].sort();
+  const embs = [...new Set(rows.map((r) => r.Embeddings))].sort();
+  if (AB_CLF !== "best" && AB_CLF !== "all" && !clfs.includes(AB_CLF)) AB_CLF = "best";
+  const chip = (attr, val, label, sel, title = "") =>
+    `<button class="pipe-chip ${sel ? "sel" : ""}" ${attr}="${esc(val)}" aria-pressed="${sel}"${
+      title ? ` title="${esc(title)}"` : ""}>${esc(label)}</button>`;
+  $("#ab-clfs").innerHTML =
+    chip("data-clf", "best", "Best", AB_CLF === "best",
+      "The classifier Master results shows for each pipeline × embedding (best normal ROC-AUC)")
+    + chip("data-clf", "all", "All", AB_CLF === "all", "Every classifier, one group each")
+    + `<span class="pick-div"></span>`
+    + clfs.map((k) => chip("data-clf", k, CLF_SHORT[k] || k, AB_CLF === k, k)).join("");
+  $("#ab-embs").innerHTML = embs.map((e) => chip("data-emb", e, e, !AB_EMB_OFF.has(e))).join("");
+}
+
+$("#ab-clfs").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-clf]");
+  if (b) { AB_CLF = b.dataset.clf; renderAblation(); }
+});
+$("#ab-embs").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-emb]");
+  if (!b) return;
+  const emb = b.dataset.emb;
+  if (AB_EMB_OFF.has(emb)) AB_EMB_OFF.delete(emb);
+  else if ($$("#ab-embs button[aria-pressed=true]").length > 1) AB_EMB_OFF.add(emb);
+  renderAblation();
+});
 
 /* rounded at the data end (x1), square against the chance baseline (x0) */
 function barPath(x0, x1, y, h, r = 4) {
@@ -703,11 +824,14 @@ function barPath(x0, x1, y, h, r = 4) {
 }
 
 /* Same rows, same order, same pick as Master results with reference = normal:
-   pipeline order, then embedding, then the classifier with the best normal ROC-AUC. */
+   pipeline order, then embedding, then the classifier with the best normal ROC-AUC
+   ("Best"), every classifier in name order ("All", as the table's "every
+   classifier"), or one named classifier. */
 function ablationGroups(modes) {
   const auc = {};
   const configs = new Map();
   for (const r of focusedResults()) {
+    if (AB_EMB_OFF.has(r.Embeddings)) continue;
     auc[`${r.Pipeline}|${r.Embeddings}|${r.Classifier}|${r.Mode}`] = r["ROC-AUC"];
     const k = `${r.Pipeline}|${r.Embeddings}`;
     if (!configs.has(k)) configs.set(k, { pipeline: r.Pipeline, emb: r.Embeddings, clfs: new Set() });
@@ -716,39 +840,51 @@ function ablationGroups(modes) {
   const order = (c) => ALL_PIPES.indexOf(c.pipeline);
   return [...configs.values()]
     .sort((a, b) => order(a) - order(b) || String(a.emb).localeCompare(String(b.emb)))
-    .map((c) => {
-      let clf = null, best = -1;
-      for (const k of [...c.clfs].sort()) {
+    .flatMap((c) => {
+      const clfs = [...c.clfs].sort();
+      let best = null, top = -1;
+      for (const k of clfs) {
         const v = auc[`${c.pipeline}|${c.emb}|${k}|normal`];
-        if (typeof v === "number" && v > best) { best = v; clf = k; }
+        if (typeof v === "number" && v > top) { top = v; best = k; }
       }
-      if (!clf) return null;   // no normal run to anchor on, same as the table
-      const vals = {};
-      for (const m of modes) vals[m] = auc[`${c.pipeline}|${c.emb}|${clf}|${m}`];
-      return { pipeline: c.pipeline, emb: c.emb, clf, vals };
-    })
-    .filter(Boolean);
+      const pick = AB_CLF === "best" ? (best ? [best] : [])   // no normal run to anchor on, same as the table
+        : AB_CLF === "all" ? clfs
+        : clfs.filter((k) => k === AB_CLF);
+      return pick.map((clf) => {
+        const vals = {};
+        for (const m of modes) vals[m] = auc[`${c.pipeline}|${c.emb}|${clf}|${m}`];
+        return { pipeline: c.pipeline, emb: c.emb, clf, best: clf === best, vals };
+      });
+    });
 }
 
 function renderAblation() {
   const box = $("#ablation-chart");
   const modes = STATE ? STATE.modes : ["normal", "user_intent_only", "context_only"];
+  renderAbPicker();
   const groups = AB_GROUPS = ablationGroups(modes);
   if (!groups.length) {
-    box.innerHTML = `<span class="muted">No normal-mode runs to anchor the ablation on.</span>`;
+    box.innerHTML = `<span class="muted">Nothing to show for this selection.</span>`;
     return;
   }
   // drawn at the card's real width, so 1 SVG unit = 1 CSS px and text never scales
   const w = Math.max(560, Math.round(box.clientWidth || 900));
   AB_W = box.clientWidth;
-  const { pad, right, bar, gap, group, sep, top } = AB_GEO;
+  const { pad, right, sep, subsep, top } = AB_GEO;
+  const { bar, gap, group } = groups.length > 12 ? AB_DENSE : AB_GEO;
   const plot = w - pad - right;
   const block = modes.length * bar + (modes.length - 1) * gap;
 
+  // pipelines get the heavy divider; with every classifier drawn, a light one
+  // also marks where the embedding changes inside a pipeline
+  const newPipe = (i) => i > 0 && groups[i].pipeline !== groups[i - 1].pipeline;
+  const newEmb = (i) => i > 0 && AB_CLF === "all" && !newPipe(i) && groups[i].emb !== groups[i - 1].emb;
+
   const ys = [];
   let y = top;
-  groups.forEach((g, i) => {
-    if (i && g.pipeline !== groups[i - 1].pipeline) y += sep;
+  groups.forEach((_, i) => {
+    if (newPipe(i)) y += sep;
+    else if (newEmb(i)) y += subsep;
     ys.push(y);
     y += block + group;
   });
@@ -769,14 +905,16 @@ function renderAblation() {
   let hits = "", seps = "", body = "";
   groups.forEach((g, gi) => {
     const y0 = ys[gi];
-    if (gi && g.pipeline !== groups[gi - 1].pipeline) {
+    if (newPipe(gi) || newEmb(gi)) {
       const sy = (ys[gi - 1] + block + y0) / 2;
-      seps += `<line x1="0" y1="${sy}" x2="${w}" y2="${sy}" class="ab-sep"/>`;
+      seps += `<line x1="0" y1="${sy}" x2="${w}" y2="${sy}" class="${newPipe(gi) ? "ab-sep" : "ab-sep-thin"}"/>`;
     }
     hits += `<rect x="0" y="${y0 - group / 2 + 2}" width="${w}" height="${block + group - 4}" rx="6" class="ab-hit" data-i="${gi}"/>`;
-    // two lines: the configuration, then the classifier under it (short name, as in the table)
+    // two lines: the configuration, then the classifier under it (short name, as in the table);
+    // with every classifier on screen, the one Master results picks is marked
+    const mark = AB_CLF === "all" && g.best ? `<tspan class="ab-best"> · best</tspan>` : "";
     body += `<text x="${pad - 12}" y="${y0 + block / 2 - 3}" class="ab-label" text-anchor="end">${esc(pShort(g.pipeline))} · ${esc(g.emb)}</text>
-      <text x="${pad - 12}" y="${y0 + block / 2 + 14}" class="ab-clf" text-anchor="end">${esc(CLF_SHORT[g.clf] || g.clf)}</text>`;
+      <text x="${pad - 12}" y="${y0 + block / 2 + 14}" class="ab-clf" text-anchor="end">${esc(CLF_SHORT[g.clf] || g.clf)}${mark}</text>`;
     modes.forEach((m, mi) => {
       const v = g.vals[m];
       const by = y0 + mi * (bar + gap);
@@ -796,10 +934,16 @@ function renderAblation() {
   const legend = modes.map((m) =>
     `<span class="ab-key"><i style="background:${MODE_HUE[m]}"></i>${MODE_SHORT[m]}</span>`).join("");
 
+  const note = AB_CLF === "best"
+    ? "each group is the classifier shown in Master results, so bar gaps equal its Δ"
+    : AB_CLF === "all"
+      ? `every classifier, one group each · "best" marks the one Master results shows`
+      : `${esc(AB_CLF)} in every configuration`;
+
   box.innerHTML = `<div class="ab-legend">${legend}
-      <span class="ab-note">each group is the classifier shown in Master results, so bar gaps equal its Δ</span></div>
+      <span class="ab-note">${note}</span></div>
     <svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" class="ab-svg" role="img"
-      aria-label="ROC-AUC per pipeline and embedding for the Master-results classifier, one bar per ablation mode">
+      aria-label="ROC-AUC per pipeline, embedding and classifier, one bar per ablation mode">
       ${hits}${grid}${seps}${body}
     </svg>
     <div class="ab-tip" hidden></div>`;
@@ -836,7 +980,8 @@ function abTipHTML(g, modes) {
       <td class="tip-flag">${has && v < 0.5 ? "below chance" : ""}</td></tr>`;
   }).join("");
   return `<div class="tip-h">${esc(pLabel(g.pipeline))}</div>
-    <div class="tip-sub">${esc(g.emb)} · ${esc(g.clf)} · ROC-AUC</div>
+    <div class="tip-sub">${esc(g.emb)} · ${esc(g.clf)}${
+      g.best && AB_CLF !== "best" ? " (Master results pick)" : ""} · ROC-AUC</div>
     <table>${rows}</table>`;
 }
 

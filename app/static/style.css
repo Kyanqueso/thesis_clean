@@ -123,6 +123,8 @@ h3 { font-size: 12px; color: var(--muted); margin: 8px 0 4px; font-weight: 650; 
 .ab-grid { stroke: var(--grid); stroke-width: 1; }
 .ab-chance { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 4 3; }
 .ab-sep { stroke: rgba(255, 255, 255, 0.34); stroke-width: 2; }
+.ab-sep-thin { stroke: var(--border); stroke-width: 1; }
+.ab-best { fill: var(--accent); font-weight: 600; }
 .ab-tick { fill: var(--muted); font: 12px var(--sans); }
 .ab-tick-chance { fill: var(--ink-2); font-weight: 600; }
 /* one hover target per group; everything drawn over it lets the pointer through */
@@ -298,9 +300,13 @@ table.plain th { cursor: default; }
 .fig-cap { font-size: 11px; color: var(--muted); font-family: var(--mono); margin-top: 3px; }
 
 /* run picker: two rows of the same chips as the Focus filter */
-.fig-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 26px; margin: 2px 0 16px; }
-.fig-pick .grp { display: flex; align-items: center; gap: 8px; }
-.fig-pick .lbl { font-size: 12px; font-weight: 600; color: var(--ink-2); margin-right: 2px; }
+/* also the ablation card's classifier / embedding picker */
+.fig-pick, .ab-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 26px; margin: 2px 0 16px; }
+.fig-pick .grp, .ab-pick .grp { display: flex; align-items: center; gap: 8px; }
+.fig-pick .lbl, .ab-pick .lbl { font-size: 12px; font-weight: 600; color: var(--ink-2); margin-right: 2px; }
+/* splits Best / All from the individual classifiers */
+.pick-div { width: 1px; height: 18px; background: var(--border-strong); margin: 0 2px; }
+.pick-hint { margin-left: auto; font-size: 12px; color: var(--muted); }
 button.pipe-chip { font-family: inherit; }
 button.pipe-chip:disabled { opacity: 0.35; cursor: not-allowed; border-color: var(--border); }
 
@@ -671,3 +677,25 @@ p.note { font-size: 13px; margin: 8px 0 0; line-height: 1.5; }
 .fig-nav.prev { left: 12px; }
 .fig-nav.next { right: 12px; }
 .figures a { cursor: zoom-in; }
+
+/* ---------------- tooltips + Master results key ---------------- */
+/* one floating card for every [data-tip] (see app.js): instant, allows line
+   breaks, and fixed-positioned so the table's scroll box cannot clip it */
+.tip {
+  position: fixed; z-index: 50; pointer-events: none; max-width: 360px;
+  background: var(--card2); border: 1px solid var(--border-strong); border-radius: 9px;
+  padding: 9px 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font-size: 12.5px; line-height: 1.5; color: var(--text); white-space: pre-line;
+}
+/* faint dotted underline says "hover me" without shouting */
+th[data-tip] {
+  cursor: help; text-decoration: underline dotted rgba(255, 255, 255, 0.28);
+  text-underline-offset: 4px;
+}
+td[data-tip] { cursor: help; }
+
+/* one always-visible line under the table instead of a collapsed paragraph */
+.key { display: flex; flex-wrap: wrap; gap: 4px 22px; margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+.key .key-bad { color: var(--bad); }
+.key .ns { font-size: 12.5px; }
+.key .key-hint { margin-left: auto; font-style: italic; }

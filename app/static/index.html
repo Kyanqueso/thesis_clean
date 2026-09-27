@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>thesis_clean dashboard</title>
-<link rel="stylesheet" href="/static/style.css?v=39">
+<link rel="stylesheet" href="/static/style.css?v=41">
 </head>
 <body>
 <header>
@@ -144,17 +144,16 @@
     </div>
     <div id="master-notes"></div>
     <div class="scroll"><table id="master-table" class="master"></table></div>
-    <details class="why"><summary>How to read Δ and p</summary>
-      <p class="muted note">Δ is absolute degradation in percentage points: reference − ablated,
-        so positive means the ablation <b>hurt</b>. A non-positive Δ on intent-only means the
-        classes separate without the injection — a corpus shortcut, not detection.
-        <b>ns</b> marks a Δ whose paired McNemar test (Holm-corrected, same frozen test rows)
-        is not significant; hover any Δ for its exact <b>p</b>.</p>
-    </details>
+    <div id="master-key" class="key"></div>
   </div>
 
   <div class="card" id="ablation-card">
     <h2>Ablation <span class="muted">— does the signal come from the context or the intent?</span></h2>
+    <div class="ab-pick">
+      <div class="grp"><span class="lbl">Classifier</span><div id="ab-clfs" class="grp"></div></div>
+      <div class="grp"><span class="lbl">Embedding</span><div id="ab-embs" class="grp"></div></div>
+      <span class="pick-hint">pipelines follow the P1 / P2 / P3 filter above</span>
+    </div>
     <div id="ablation-chart"></div>
   </div>
 
@@ -271,6 +270,6 @@
   </div>
 </dialog>
 
-<script src="/static/app.js?v=36"></script>
+<script src="/static/app.js?v=38"></script>
 </body>
 </html>
