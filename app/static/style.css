@@ -77,9 +77,11 @@ h3 { font-size: 12px; color: var(--muted); margin: 8px 0 4px; font-weight: 650; 
 .muted { color: var(--muted); }
 .scroll { overflow-x: auto; }
 
-/* the all-runs table scrolls inside its card instead of stretching the page */
-#allrows-card .scroll { max-height: 420px; overflow-y: auto; }
-#allrows-card th { position: sticky; top: 0; background: var(--card); z-index: 1; }
+/* the all-runs table scrolls inside its card: "all" modes is 135 rows. The
+   header row stays pinned while scrolling; the heatmap view is not in a .scroll
+   box, so neither rule touches it */
+#allrows-card .scroll { max-height: 560px; overflow-y: auto; }
+#results-table th { position: sticky; top: 0; background: var(--card); z-index: 1; }
 
 /* ---------------- forms ---------------- */
 .field { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--ink-2); margin: 4px 0; }
@@ -236,7 +238,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; cursor: pointer; us
 tbody tr:hover td, table tr:hover td { background: rgba(255, 255, 255, 0.04); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.wrapcell { white-space: normal; min-width: 150px; }
-tr.best td { font-weight: 650; }
+/* a row Master results shows: an accent edge only — bolding whole rows was loud */
 tr.best td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 table.plain th { cursor: default; }
 
@@ -699,3 +701,56 @@ td[data-tip] { cursor: help; }
 .key .key-bad { color: var(--bad); }
 .key .ns { font-size: 12.5px; }
 .key .key-hint { margin-left: auto; font-style: italic; }
+
+/* ---------------- all runs: keys + heatmap ---------------- */
+.key-edge { display: inline-block; width: 3px; height: 13px; background: var(--accent); margin-right: 7px; vertical-align: -2px; }
+.key-pick { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 7px; vertical-align: -1px;
+  box-shadow: inset 0 0 0 2px var(--text); }
+
+/* one classifier × embedding grid per pipeline, side by side when they fit */
+.heats { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 20px 28px; }
+.heat-h { font-size: 14px; font-weight: 650; color: var(--text); margin-bottom: 8px; }
+.heat-h span { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 6px; }
+table.heat-t { border-collapse: separate; border-spacing: 3px; width: 100%; }
+table.heat-t th { cursor: default; border: 0; padding: 4px 8px; text-align: center; font-size: 12px; }
+table.heat-t th.heat-clf { text-align: right; color: var(--ink-2); font-weight: 500; }
+table.heat-t td {
+  border: 0; border-radius: 5px; padding: 9px 8px; text-align: center; cursor: help;
+  font-variant-numeric: tabular-nums; color: var(--text);
+}
+table.heat-t td.pick { box-shadow: inset 0 0 0 2px var(--text); font-weight: 650; }
+table.heat-t td.below { color: var(--bad); font-weight: 650; }
+table.heat-t td.heat-none { color: var(--muted); background: var(--card2); }
+/* the global row-hover tint would fight the cell shading */
+table.heat-t tr:hover td { filter: brightness(1.12); }
+
+/* ---------------- Analysis mini-nav ---------------- */
+/* rides in the sticky header, so it needs no offset of its own; the divider and
+   quieter text keep it from reading as a fifth tab */
+.sec-nav {
+  display: flex; align-items: center; gap: 2px;
+  padding-left: 16px; border-left: 1px solid var(--border);
+}
+.sec-nav button {
+  font: inherit; font-size: 13px; color: var(--muted); cursor: pointer;
+  background: none; border: none; padding: 5px 10px; border-radius: 999px;
+}
+.sec-nav button:hover { color: var(--text); background: var(--card2); }
+/* the section under the header: same accent as the selected chips */
+.sec-nav button.on { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+/* too narrow to sit beside the tabs; the page still scrolls normally */
+@media (max-width: 1100px) { .sec-nav { display: none; } }
+
+/* a jump stops just below the sticky header instead of under it */
+#master-card, #ablation-card, #allrows-card, #figures-card {
+  scroll-margin-top: calc(var(--hdr, 54px) + 12px);
+}
+
+/* labels that explain themselves on hover (verdict tag, legend, figure headings):
+   the same faint dotted underline as the table headers; buttons keep their
+   pointer cursor, since clicking is what they are for */
+.v-tag[data-tip], .v-row[data-tip] { cursor: help; }
+.ab-key[data-tip], .fig-head span[data-tip] {
+  cursor: help; text-decoration: underline dotted rgba(255, 255, 255, 0.28);
+  text-underline-offset: 4px;
+}

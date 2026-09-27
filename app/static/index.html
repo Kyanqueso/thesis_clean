@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>thesis_clean dashboard</title>
-<link rel="stylesheet" href="/static/style.css?v=41">
+<link rel="stylesheet" href="/static/style.css?v=44">
 </head>
 <body>
 <header>
@@ -14,6 +14,14 @@
     <button class="tab-btn active" data-tab="detect">Simulation</button>
     <button class="tab-btn" data-tab="results">Analysis</button>
     <button class="tab-btn" data-tab="files">Files</button>
+  </nav>
+  <!-- Analysis only: jump links to its sections, riding in the sticky header -->
+  <nav id="sec-nav" class="sec-nav" aria-label="Analysis sections" hidden>
+    <button data-go="top">Verdicts</button>
+    <button data-go="master-card">Master results</button>
+    <button data-go="ablation-card">Ablation</button>
+    <button data-go="allrows-card">All runs</button>
+    <button data-go="figures-card">Figures</button>
   </nav>
   <div id="queue-pill" class="pill">idle</div>
 </header>
@@ -159,14 +167,15 @@
 
   <div class="card" id="allrows-card">
     <h2>All runs</h2>
-    <div class="row wrap gap" id="results-filters">
-      <label class="field"><span>Pipeline</span><select id="rf-pipeline"><option value="">all</option></select></label>
-      <label class="field"><span>Mode</span><select id="rf-mode"><option value="">all</option></select></label>
-      <label class="field"><span>Embeddings</span><select id="rf-emb"><option value="">all</option></select></label>
-      <label class="field"><span>Classifier</span><select id="rf-clf"><option value="">all</option></select></label>
-      <span class="muted" id="rf-count"></span>
+    <div class="ab-pick" id="rf-pick">
+      <div class="grp"><span class="lbl">View</span><div id="rf-view" class="grp"></div></div>
+      <div class="grp"><span class="lbl">Mode</span><div id="rf-modes" class="grp"></div></div>
+      <div class="grp" id="rf-metric-grp" hidden><span class="lbl">Metric</span><div id="rf-metrics" class="grp"></div></div>
+      <div class="grp"><span class="lbl">Embedding</span><div id="rf-embs" class="grp"></div></div>
+      <div class="grp"><span class="lbl">Classifier</span><div id="rf-clfs" class="grp"></div></div>
+      <span class="pick-hint" id="rf-count"></span>
     </div>
-    <div class="scroll"><table id="results-table"></table></div>
+    <div id="rf-body"></div>
   </div>
 
   <div class="card" id="figures-card">
@@ -270,6 +279,6 @@
   </div>
 </dialog>
 
-<script src="/static/app.js?v=38"></script>
+<script src="/static/app.js?v=41"></script>
 </body>
 </html>

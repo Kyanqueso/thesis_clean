@@ -14,7 +14,7 @@ if (!PIPE_FOCUS || !PIPE_FOCUS.size) PIPE_FOCUS = new Set(["pipeline3_organic_in
 function renderPipeChips() {
   const el = $("#pipe-chips");
   el.innerHTML = `<span class="lbl">Focus — all cards</span>` + ALL_PIPES.map((p) =>
-    `<span class="pipe-chip ${PIPE_FOCUS.has(p) ? "sel" : ""}" data-pipe="${p}" title="${esc(pLabel(p))}">${pShort(p)}</span>`).join("");
+    `<span class="pipe-chip ${PIPE_FOCUS.has(p) ? "sel" : ""}" data-pipe="${p}" data-tip="${esc(pLabel(p))}">${pShort(p)}</span>`).join("");
   $$(".pipe-chip").forEach((c) => c.addEventListener("click", () => {
     const p = c.dataset.pipe;
     if (PIPE_FOCUS.has(p)) {
@@ -68,6 +68,18 @@ const VERDICT_NOTE = {
   "no runs": "no results for this pipeline yet",
 };
 
+// hover text on the verdict tag: the exact rule, built from the thresholds above
+// so it cannot drift from what the code decides
+const VERDICT_TIP = {
+  detects: `DETECTS: intent alone scores ${CHANCE_AUC.toFixed(2)} ROC-AUC or less (near chance), `
+    + `and the normal run reaches ${DETECT_AUC.toFixed(2)} or more.\nThe model needs the injected context to tell the classes apart.`,
+  shortcut: `SHORTCUT: intent alone scores ${SHORTCUT_AUC.toFixed(2)} ROC-AUC or more.\n`
+    + "The classes can be told apart without seeing the injection, so a high score does not prove detection.",
+  inconclusive: `INCONCLUSIVE: neither rule applies. Intent alone scores between ${CHANCE_AUC.toFixed(2)} `
+    + `and ${SHORTCUT_AUC.toFixed(2)}, or it is near chance but the normal run is below ${DETECT_AUC.toFixed(2)}.`,
+};
+const VERDICT_BASIS = "\nScores are each mode's best ROC-AUC across every embedding and classifier.";
+
 /* One labelled line per mode: which configuration won, how well it RANKS
    (ROC-AUC) and how often it is RIGHT at the 0.50 threshold (accuracy). Both
    are named in the markup — a bare 0.9818 reads as accuracy when it is not, and
@@ -76,7 +88,7 @@ function verdictRow(v, mode, label) {
   const row = v.best[mode];
   const num = (x) => (typeof x === "number" ? fmt(x, 4) : "—");
   const clf = row ? `${row.Embeddings} + ${row.Classifier}` : "no run for this mode";
-  return `<div class="v-row" title="Best ROC-AUC configuration: ${esc(clf)}">
+  return `<div class="v-row" data-tip="${esc(`Best ROC-AUC configuration: ${clf}\nAccuracy is from that same model, at the 0.5 threshold.`)}">
     <span class="v-mode">${label}</span>
     <span class="v-metric">ROC-AUC <b>${num(row && row["ROC-AUC"])}</b></span>
     <span class="v-metric">accuracy <b>${num(row && row["Accuracy"])}</b></span>
@@ -87,7 +99,7 @@ function renderVerdicts() {
   const cards = ALL_PIPES.map(pipelineVerdict).filter((v) => v.verdict !== "no runs");
   $("#verdict-strip").innerHTML = cards.map((v) => `<div class="verdict ${v.verdict}">
     <div class="v-head"><b>${esc(pShort(v.pipeline))}</b>
-      <span class="v-tag">${v.verdict}</span></div>
+      <span class="v-tag"${VERDICT_TIP[v.verdict] ? ` data-tip="${esc(VERDICT_TIP[v.verdict] + VERDICT_BASIS)}"` : ""}>${v.verdict}</span></div>
     <div class="v-name">${esc(pLabel(v.pipeline).replace(/^P\d+\s*·\s*/, ""))}</div>
     <div class="v-nums">
       ${verdictRow(v, "normal", "normal")}
@@ -122,19 +134,18 @@ const pLabel = (p) => (STATE && STATE.pipelines[p]) || p;
 const pShort = (p) => p.replace("pipeline", "P").split("_")[0];
 
 /* One floating tooltip for anything carrying data-tip. The browser's own title
-   tooltip waits ~1s, is tiny and unstyled; this one shows at once, allows line
-   breaks, and is position:fixed so a scrolling table cannot clip it. */
+   tooltip waits ~1s, is tiny and unstyled; this one allows line breaks and is
+   position:fixed so a scrolling table cannot clip it. The first one waits a
+   beat, so sweeping the mouse across a row of buttons does not flash a tooltip
+   per button; while one is open (or just closed) its neighbours swap in at once. */
 const TIP = document.createElement("div");
 TIP.className = "tip";
 TIP.hidden = true;
 document.body.appendChild(TIP);
-let tipFor = null;
+let tipFor = null, tipTimer = 0, tipWarmUntil = 0;
 
-document.addEventListener("mouseover", (e) => {
-  const el = e.target.closest ? e.target.closest("[data-tip]") : null;
-  if (el === tipFor) return;
-  tipFor = el;
-  if (!el) { TIP.hidden = true; return; }
+function showTip(el) {
+  if (tipFor !== el || !el.isConnected) return;
   TIP.textContent = el.dataset.tip;
   TIP.hidden = false;
   const r = el.getBoundingClientRect(), t = TIP.getBoundingClientRect();
@@ -142,19 +153,71 @@ document.addEventListener("mouseover", (e) => {
   const top = r.bottom + 8 + t.height > innerHeight - 8 ? r.top - t.height - 8 : r.bottom + 8;
   TIP.style.left = `${left}px`;
   TIP.style.top = `${top}px`;
+}
+
+document.addEventListener("mouseover", (e) => {
+  const el = e.target.closest ? e.target.closest("[data-tip]") : null;
+  if (el === tipFor) return;
+  clearTimeout(tipTimer);
+  if (!TIP.hidden) tipWarmUntil = Date.now() + 400;
+  TIP.hidden = true;
+  tipFor = el;
+  if (!el) return;
+  if (Date.now() < tipWarmUntil) showTip(el);
+  else tipTimer = setTimeout(() => showTip(el), 350);
 });
-const hideTip = () => { TIP.hidden = true; tipFor = null; };
+const hideTip = () => { clearTimeout(tipTimer); TIP.hidden = true; tipFor = null; };
 document.addEventListener("mouseleave", hideTip);
+document.addEventListener("mousedown", hideTip);   // a click answers the question the tooltip was for
 window.addEventListener("scroll", hideTip, true);
 
 /* ================= tabs ================= */
 $$(".tab-btn").forEach((b) => b.addEventListener("click", () => {
   $$(".tab-btn").forEach((x) => x.classList.toggle("active", x === b));
   $$("section.tab").forEach((s) => s.classList.toggle("active", s.id === "tab-" + b.dataset.tab));
+  $("#sec-nav").hidden = b.dataset.tab !== "results";
   if (b.dataset.tab === "results") loadResults();
   if (b.dataset.tab === "detect") loadDetectOptions();
   if (b.dataset.tab === "files") { loadFiles(); loadPeek(); }
 }));
+
+/* ---------- Analysis mini-nav ----------
+   Jump links in the sticky header, shown on the Analysis tab only. The section
+   currently under the header is highlighted as the page scrolls, and links to
+   cards that are hidden (no results yet) are hidden with them. */
+const SEC_IDS = ["master-card", "ablation-card", "allrows-card", "figures-card"];
+const PAGE_HEADER = $("body > header");
+
+// the header's real height, so a jump lands just below it instead of under it
+new ResizeObserver(() =>
+  document.documentElement.style.setProperty("--hdr", `${PAGE_HEADER.offsetHeight}px`)).observe(PAGE_HEADER);
+
+$("#sec-nav").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-go]");
+  if (!b) return;
+  if (b.dataset.go === "top") window.scrollTo({ top: 0, behavior: "smooth" });
+  else document.getElementById(b.dataset.go).scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+function updateSecNav() {
+  const nav = $("#sec-nav");
+  if (nav.hidden) return;
+  const shown = SEC_IDS.filter((id) => document.getElementById(id).offsetParent);
+  const line = PAGE_HEADER.offsetHeight + 40;
+  let current = "top";
+  for (const id of shown) if (document.getElementById(id).getBoundingClientRect().top <= line) current = id;
+  // scrolled to the very bottom: the last card may be too short to reach the line
+  if (shown.length && innerHeight + scrollY >= document.documentElement.scrollHeight - 2) current = shown.at(-1);
+  nav.querySelectorAll("button[data-go]").forEach((b) => {
+    b.hidden = b.dataset.go !== "top" && !shown.includes(b.dataset.go);
+    b.classList.toggle("on", b.dataset.go === current);
+    if (b.dataset.go === current) b.setAttribute("aria-current", "true"); else b.removeAttribute("aria-current");
+  });
+}
+let secRaf = 0;
+window.addEventListener("scroll", () => {
+  if (!secRaf) secRaf = requestAnimationFrame(() => { secRaf = 0; updateSecNav(); });
+}, { passive: true });
 
 /* ================= run tab ================= */
 /* Embeddings and results ship with the repo, so the dashboard no longer builds
@@ -540,14 +603,15 @@ async function loadResults() {
   $("#no-results-card").style.display = empty ? "" : "none";
   for (const id of ["#master-card", "#ablation-card", "#allrows-card", "#figures-card"])
     $(id).style.display = empty ? "none" : "";
+  updateSecNav();
   if (empty) return;
   renderVerdicts();
   renderPipeChips();
   loadMaster();
   renderAblation();
-  fillResultFilters();
   renderResultsTable();
   renderFigPicker();
+  updateSecNav();
 }
 
 function runKey(r) { return `${r.Pipeline}|${r.Mode}`; }
@@ -563,6 +627,9 @@ const MASTER_COST = [
 
 // the one long classifier name sets the column width for every row
 const CLF_SHORT = { LogisticRegression: "LogReg" };
+// spelled out once, in the Classifier header tooltips, not on every LogReg cell
+const CLF_ABBR = Object.entries(CLF_SHORT)
+  .map(([full, short]) => `${short} = ${full.replace(/([a-z])([A-Z])/g, "$1 $2")}`).join(", ");
 
 /* Header hover text for Master results: what each column is and how it is
    computed. Replaces the collapsed "How to read Δ and p" paragraph. */
@@ -682,9 +749,9 @@ function renderMaster() {
   const refName = MODE_SHORT[ref];
   const tipAttr = (tip) => ` data-tip="${esc(tip)}"`;
   const th = (label, tip, cls = "") => `<th${cls ? ` class="${cls}"` : ""}${tipAttr(tip)}>${label}</th>`;
-  const clfTip = $("#ms-collapse").value === "best"
+  const clfTip = ($("#ms-collapse").value === "best"
     ? `The classifier with the best ROC-AUC in the ${refName} run, for this pipeline × embedding.`
-    : "Each classifier trained on these embeddings, one row each.";
+    : "Each classifier trained on these embeddings, one row each.") + `\n${CLF_ABBR}.`;
 
   // two-tier header: group band on top, columns beneath; every header explains itself on hover
   const band = (n, label, tip) => (n ? `<th colspan="${n}"${tipAttr(tip)}>${label}</th>` : "");
@@ -714,7 +781,7 @@ function renderMaster() {
     body += `<tr class="${sep}">
       <td${tipAttr(pLabel(r.Pipeline))}>${esc(pShort(r.Pipeline))}</td>
       <td>${esc(r.Embeddings)}</td>
-      <td${CLF_SHORT[r.Classifier] ? tipAttr(r.Classifier) : ""}>${esc(CLF_SHORT[r.Classifier] || r.Classifier)}</td>
+      <td>${esc(CLF_SHORT[r.Classifier] || r.Classifier)}</td>
       ${q.map((m) => `<td class="num">${mfmt(r[m])}</td>`).join("")}
       ${errs.map((e) => `<td class="num">${mfmt(r[e])}</td>`).join("")}
       ${degVars.map((v) => degCell(r[`Deg:${v}:${metric}`], r[`Sig:${v}:significant`], v, r[`Sig:${v}:p_holm`])).join("")}
@@ -788,15 +855,15 @@ function renderAbPicker() {
   const clfs = [...new Set(rows.map((r) => r.Classifier))].sort();
   const embs = [...new Set(rows.map((r) => r.Embeddings))].sort();
   if (AB_CLF !== "best" && AB_CLF !== "all" && !clfs.includes(AB_CLF)) AB_CLF = "best";
-  const chip = (attr, val, label, sel, title = "") =>
+  const chip = (attr, val, label, sel, tip = "") =>
     `<button class="pipe-chip ${sel ? "sel" : ""}" ${attr}="${esc(val)}" aria-pressed="${sel}"${
-      title ? ` title="${esc(title)}"` : ""}>${esc(label)}</button>`;
+      tip ? ` data-tip="${esc(tip)}"` : ""}>${esc(label)}</button>`;
   $("#ab-clfs").innerHTML =
     chip("data-clf", "best", "Best", AB_CLF === "best",
       "The classifier Master results shows for each pipeline × embedding (best normal ROC-AUC)")
     + chip("data-clf", "all", "All", AB_CLF === "all", "Every classifier, one group each")
     + `<span class="pick-div"></span>`
-    + clfs.map((k) => chip("data-clf", k, CLF_SHORT[k] || k, AB_CLF === k, k)).join("");
+    + clfs.map((k) => chip("data-clf", k, CLF_SHORT[k] || k, AB_CLF === k)).join("");
   $("#ab-embs").innerHTML = embs.map((e) => chip("data-emb", e, e, !AB_EMB_OFF.has(e))).join("");
 }
 
@@ -932,7 +999,7 @@ function renderAblation() {
   });
 
   const legend = modes.map((m) =>
-    `<span class="ab-key"><i style="background:${MODE_HUE[m]}"></i>${MODE_SHORT[m]}</span>`).join("");
+    `<span class="ab-key" data-tip="${esc(MODE_DESC[m])}"><i style="background:${MODE_HUE[m]}"></i>${MODE_SHORT[m]}</span>`).join("");
 
   const note = AB_CLF === "best"
     ? "each group is the classifier shown in Master results, so bar gaps equal its Δ"
@@ -991,64 +1058,176 @@ new ResizeObserver(() => {
   if (w && RESULTS.length && Math.abs(w - AB_W) > 4) renderAblation();
 }).observe($("#ablation-chart"));
 
-function fillResultFilters() {
-  const fill = (id, values, labelFn = (x) => x) => {
-    const el = $(id);
-    const cur = el.value;
-    el.innerHTML = `<option value="">all</option>` +
-      values.map((v) => `<option value="${esc(v)}">${esc(labelFn(v))}</option>`).join("");
-    el.value = cur;
-  };
-  fill("#rf-pipeline", [...new Set(RESULTS.map((r) => r.Pipeline))], pShort);
-  fill("#rf-mode", [...new Set(RESULTS.map((r) => r.Mode))], (m) => MODE_SHORT[m]);
-  /* Sorting every mode by ROC-AUC puts the intent-only corpus shortcut on top, which
-     reads as the best result. Land on normal; the dropdown still reaches the rest. */
-  const mode = $("#rf-mode");
-  if (!mode.dataset.defaulted) {
-    mode.dataset.defaulted = "1";
-    if ([...mode.options].some((o) => o.value === "normal")) mode.value = "normal";
-  }
-  fill("#rf-emb", [...new Set(RESULTS.map((r) => r.Embeddings))]);
-  fill("#rf-clf", [...new Set(RESULTS.map((r) => r.Classifier))]);
-}
-for (const id of ["#rf-pipeline", "#rf-mode", "#rf-emb", "#rf-clf"])
-  $(id).addEventListener("change", renderResultsTable);
-
+/* ---------- all runs ----------
+   Same button pickers as Figures and the ablation card. Pipelines come from the
+   Focus chips only: the old Pipeline dropdown could contradict them and show 0
+   rows. Rows stay grouped by pipeline (sorting happens inside each group) with
+   the Master-results divider, and the classifier Master results shows for each
+   pipeline × embedding gets an accent edge. The heatmap is the same rows as a
+   classifier × embedding grid per pipeline. */
+const RF = { view: "table", mode: "normal", metric: "ROC-AUC", embOff: new Set(), clfOff: new Set() };
+// [result key, header, decimals, scale] — headers match Master results
+const RF_COLS = [
+  ["Pipeline", "Pipeline"], ["Mode", "Mode"], ["Embeddings", "Emb"], ["Classifier", "Classifier"],
+  ["Accuracy", "Acc", 4], ["F1-Score", "F1", 4], ["ROC-AUC", "ROC-AUC", 4], ["PR-AUC", "PR-AUC", 4],
+  ["Train-Time(s)", "fit s", 1], ["Inference-Time-per-Sample(ms)", "µs/row", 1, 1000],
+];
+const RF_TIP = {
+  "Mode": "Which input the model saw: normal = intent + context, intent-only, or context-only.",
+  "Classifier": "The classifier trained on the embeddings.\nA blue left edge marks the one Master results shows (best normal ROC-AUC).\n"
+    + `${CLF_ABBR}.`,
+  "Inference-Time-per-Sample(ms)": "Total inference time on the test set ÷ number of rows, in microseconds.",
+};
+const RF_METRICS = [["ROC-AUC", "ROC-AUC"], ["PR-AUC", "PR-AUC"], ["F1-Score", "F1"], ["Accuracy", "Acc"]];
 let sortCol = "ROC-AUC", sortAsc = false;
 
+/* the classifier Master results shows per pipeline × embedding: best normal ROC-AUC,
+   ties to the first name alphabetically, as the table does */
+function masterPicks() {
+  const best = {};
+  for (const r of [...RESULTS].sort((a, b) => a.Classifier.localeCompare(b.Classifier))) {
+    if (r.Mode !== "normal" || typeof r["ROC-AUC"] !== "number") continue;
+    const k = `${r.Pipeline}|${r.Embeddings}`;
+    if (!best[k] || r["ROC-AUC"] > best[k]["ROC-AUC"]) best[k] = r;
+  }
+  return new Set(Object.values(best).map((r) => `${r.Pipeline}|${r.Embeddings}|${r.Classifier}`));
+}
+
+function renderRfPicker() {
+  const rows = RESULTS.filter((r) => PIPE_FOCUS.has(r.Pipeline));
+  const modes = STATE ? STATE.modes : ["normal", "user_intent_only", "context_only"];
+  const embs = [...new Set(rows.map((r) => r.Embeddings))].sort();
+  const clfs = [...new Set(rows.map((r) => r.Classifier))].sort();
+  const heat = RF.view === "heat";
+  if (heat && RF.mode === "all") RF.mode = "normal";   // a grid holds one mode
+  const chip = (attr, val, label, sel, tip = "") =>
+    `<button class="pipe-chip ${sel ? "sel" : ""}" ${attr}="${esc(val)}" aria-pressed="${sel}"${
+      tip ? ` data-tip="${esc(tip)}"` : ""}>${esc(label)}</button>`;
+  $("#rf-view").innerHTML = chip("data-view", "table", "Table", !heat)
+    + chip("data-view", "heat", "Heatmap", heat, "One classifier × embedding grid per pipeline, shaded by the chosen metric.");
+  $("#rf-modes").innerHTML = modes.map((m) => chip("data-mode", m, MODE_SHORT[m], RF.mode === m, MODE_DESC[m])).join("")
+    + (heat ? "" : chip("data-mode", "all", "all", RF.mode === "all", "Rows from all three modes together."));
+  $("#rf-metric-grp").hidden = !heat;
+  $("#rf-metrics").innerHTML = RF_METRICS.map(([k, l]) => chip("data-metric", k, l, RF.metric === k, COL_TIP[k])).join("");
+  $("#rf-embs").innerHTML = embs.map((e) => chip("data-emb", e, e, !RF.embOff.has(e))).join("");
+  $("#rf-clfs").innerHTML = clfs.map((k) => chip("data-clf", k, CLF_SHORT[k] || k, !RF.clfOff.has(k))).join("");
+}
+
+// toggle chips keep at least one option on, like the Focus chips
+function toggleKeep(off, value, box) {
+  if (off.has(value)) off.delete(value);
+  else if ($$(`${box} button[aria-pressed=true]`).length > 1) off.add(value);
+}
+
+$("#rf-pick").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  const d = b.dataset;
+  if (d.view) RF.view = d.view;
+  else if (d.mode) RF.mode = d.mode;
+  else if (d.metric) RF.metric = d.metric;
+  else if (d.emb) toggleKeep(RF.embOff, d.emb, "#rf-embs");
+  else if (d.clf) toggleKeep(RF.clfOff, d.clf, "#rf-clfs");
+  else return;
+  renderResultsTable();
+});
+
 function renderResultsTable() {
-  const f = {
-    Pipeline: $("#rf-pipeline").value, Mode: $("#rf-mode").value,
-    Embeddings: $("#rf-emb").value, Classifier: $("#rf-clf").value,
-  };
-  let rows = RESULTS.filter((r) => PIPE_FOCUS.has(r.Pipeline)
-    && Object.entries(f).every(([k, v]) => !v || r[k] === v));
-  rows = rows.slice().sort((a, b) => {
+  renderRfPicker();
+  const inFocus = RESULTS.filter((r) => PIPE_FOCUS.has(r.Pipeline));
+  const rows = inFocus.filter((r) => (RF.mode === "all" || r.Mode === RF.mode)
+    && !RF.embOff.has(r.Embeddings) && !RF.clfOff.has(r.Classifier));
+  const picks = masterPicks();
+  const pickKey = (r) => `${r.Pipeline}|${r.Embeddings}|${r.Classifier}`;
+
+  if (RF.view === "heat") {
+    $("#rf-count").textContent = "";
+    renderRfHeat(rows, picks);
+    return;
+  }
+  $("#rf-count").textContent = `${rows.length} of ${inFocus.length} rows`;
+
+  const order = (r) => ALL_PIPES.indexOf(r.Pipeline);
+  const sorted = rows.slice().sort((a, b) => {
+    const g = order(a) - order(b);
+    if (g) return g;
     const av = a[sortCol], bv = b[sortCol];
     const c = typeof av === "number" ? av - bv : String(av).localeCompare(String(bv));
     return sortAsc ? c : -c;
   });
-  const inFocus = RESULTS.filter((r) => PIPE_FOCUS.has(r.Pipeline)).length;
-  $("#rf-count").textContent = `${rows.length} of ${inFocus} rows`;
-  const cols = ["Pipeline", "Mode", "Embeddings", "Classifier", "Accuracy", "F1-Score", "ROC-AUC", "PR-AUC", "Train-Time(s)", "Inference-Time-per-Sample(ms)"];
-  const numCols = new Set(cols.slice(4));
-  const header = cols.map((c) =>
-    `<th class="${numCols.has(c) ? "num" : ""}" data-sort="${c}">${c === "Inference-Time-per-Sample(ms)" ? "ms/sample" : c}${sortCol === c ? (sortAsc ? " ▲" : " ▼") : ""}</th>`).join("");
-  const body = rows.map((r) => `<tr>${cols.map((c) => {
-    let v = r[c];
-    if (numCols.has(c)) {
-      return `<td class="num">${fmt(v, c.includes("Time") ? 3 : 4)}${c === "ROC-AUC" ? microbar(v) : ""}</td>`;
-    }
-    if (c === "Pipeline") return `<td title="${esc(pLabel(v))}">${esc(pShort(v))}</td>`;
-    if (c === "Mode") return `<td>${MODE_SHORT[v]}</td>`;
-    return `<td>${esc(v)}</td>`;
-  }).join("")}</tr>`).join("");
-  $("#results-table").innerHTML = `<tr>${header}</tr>${body}`;
+
+  const header = RF_COLS.map(([k, label, d]) => {
+    const tip = RF_TIP[k] || COL_TIP[k] || COL_TIP[label] || "";
+    const arrow = sortCol === k ? (sortAsc ? " ▲" : " ▼") : "";
+    return `<th class="${d !== undefined ? "num" : ""}" data-sort="${k}"${tip ? ` data-tip="${esc(tip)}"` : ""}>${label}${arrow}</th>`;
+  }).join("");
+
+  let body = "", lastPipe = null;
+  for (const r of sorted) {
+    const cls = [lastPipe && lastPipe !== r.Pipeline ? "pipe-sep" : "", picks.has(pickKey(r)) ? "best" : ""]
+      .filter(Boolean).join(" ");
+    lastPipe = r.Pipeline;
+    body += `<tr${cls ? ` class="${cls}"` : ""}>${RF_COLS.map(([k, , d, scale]) => {
+      const v = r[k];
+      if (d !== undefined) {
+        const shown = typeof v === "number" ? (v * (scale || 1)).toFixed(d) : "—";
+        return `<td class="num">${shown}${k === "ROC-AUC" ? microbar(v) : ""}</td>`;
+      }
+      if (k === "Pipeline") return `<td data-tip="${esc(pLabel(v))}">${esc(pShort(v))}</td>`;
+      if (k === "Mode") return `<td>${MODE_SHORT[v]}</td>`;
+      if (k === "Classifier") return `<td>${esc(CLF_SHORT[v] || v)}</td>`;
+      return `<td>${esc(v)}</td>`;
+    }).join("")}</tr>`;
+  }
+
+  $("#rf-body").innerHTML = `<div class="scroll"><table id="results-table">${`<tr>${header}</tr>`}${body}</table></div>
+    <div class="key"><span><i class="key-edge"></i>blue edge = the classifier Master results shows for that pipeline × embedding</span>
+      <span class="key-hint">click a header to sort · rows stay grouped by pipeline</span></div>`;
   $$("#results-table [data-sort]").forEach((th) => th.addEventListener("click", () => {
     const c = th.dataset.sort;
     if (sortCol === c) sortAsc = !sortAsc; else { sortCol = c; sortAsc = false; }
     renderResultsTable();
   }));
+}
+
+/* One classifier × embedding grid per pipeline, shaded from 0.50 (chance, faint)
+   to 1.00 (full) — the same anchor as the ablation chart — so the strongest
+   combination is visible at a glance instead of read off 45 rows. */
+function renderRfHeat(rows, picks) {
+  const m = RF.metric;
+  const mLabel = (RF_METRICS.find(([k]) => k === m) || [m, m])[1];
+  const pipes = ALL_PIPES.filter((p) => rows.some((r) => r.Pipeline === p));
+  const embs = [...new Set(rows.map((r) => r.Embeddings))].sort();
+  const clfs = [...new Set(rows.map((r) => r.Classifier))].sort();
+  const val = {};
+  for (const r of rows) val[`${r.Pipeline}|${r.Embeddings}|${r.Classifier}`] = r[m];
+  const alpha = (v) => (0.06 + 0.84 * Math.max(0, Math.min(1, (v - 0.5) / 0.5))).toFixed(3);
+
+  const grids = pipes.map((p) => {
+    const cells = clfs.map((k) => `<tr><th class="heat-clf">${esc(CLF_SHORT[k] || k)}</th>${
+      embs.map((e) => {
+        const key = `${p}|${e}|${k}`;
+        const v = val[key];
+        if (typeof v !== "number") return `<td class="heat-none">—</td>`;
+        const pick = picks.has(key);
+        const tip = `${pLabel(p)}\n${e} · ${k} · ${MODE_SHORT[RF.mode]}\n${m} ${v.toFixed(4)}`
+          + (v < 0.5 ? "\nBelow chance" : "") + (pick ? "\nShown in Master results" : "");
+        return `<td class="${pick ? "pick" : ""}${v < 0.5 ? " below" : ""}" style="background: rgba(57, 135, 229, ${alpha(v)})"
+          data-tip="${esc(tip)}">${v.toFixed(3)}</td>`;
+      }).join("")}</tr>`).join("");
+    return `<div class="heat">
+      <div class="heat-h" data-tip="${esc(pLabel(p))}">${esc(pShort(p))}
+        <span>${esc(pLabel(p).replace(/^P\d+\s*·\s*/, ""))}</span></div>
+      <table class="heat-t"><tr><th></th>${embs.map((e) => `<th>${esc(e)}</th>`).join("")}</tr>${cells}</table>
+    </div>`;
+  }).join("");
+
+  $("#rf-body").innerHTML = pipes.length
+    ? `<div class="heats">${grids}</div>
+      <div class="key"><span>${esc(mLabel)}, ${esc(MODE_SHORT[RF.mode])} runs · shade runs from 0.50 (chance, faint) to 1.00 (full)</span>
+        <span><i class="key-pick"></i>outlined = the classifier Master results shows</span>
+        <span><b class="key-bad">red</b> = below chance</span></div>`
+    : `<span class="muted">Nothing to show for this selection.</span>`;
 }
 
 /* -------- figures --------
@@ -1061,9 +1240,15 @@ let FIG_SEL = { pipeline: null, mode: "normal" };
 // column order, label, and the PNGs' aspect ratio (width / height): each column
 // is as wide as its figure's shape, so the three images in a row share a height
 const FIG_TYPES = [
-  ["confusion_matrices", "Confusion matrices", 4.78],
-  ["dimensionality_reduction", "Dimensionality reduction", 2.98],
-  ["roc_pr_curves", "ROC / PR curves", 2.31],
+  ["confusion_matrices", "Confusion matrices", 4.78,
+    "One grid per classifier: how many test rows it got right and wrong at the 0.5 threshold.\n"
+    + "Rows = actual label, columns = predicted. Darker = a larger share of that row."],
+  ["dimensionality_reduction", "Dimensionality reduction", 2.98,
+    "The embeddings squashed to 2-D so they can be seen: PCA, t-SNE and UMAP, on up to 5,000 rows.\n"
+    + "Coloured by label. Colours that sit apart = the two classes are easy to tell apart."],
+  ["roc_pr_curves", "ROC / PR curves", 2.31,
+    "Left: ROC curve, one line per classifier (dashed = chance). Right: precision–recall curve.\n"
+    + "Curves hugging the top-left (ROC) or top-right (PR) are better; the legend gives each AUC."],
 ];
 const FIG_TYPE_RE = new RegExp(`^(.+?)_(${FIG_TYPES.map((t) => t[0]).join("|")})\\.png$`);
 
@@ -1078,9 +1263,10 @@ function renderFigPicker() {
   if (!has(FIG_SEL.mode)) FIG_SEL.mode = modes.find(has) || FIG_SEL.mode;
 
   $("#fig-pipes").innerHTML = pipes.map((p) =>
-    `<button class="pipe-chip ${p === FIG_SEL.pipeline ? "sel" : ""}" data-pipe="${p}" title="${esc(pLabel(p))}">${pShort(p)}</button>`).join("");
+    `<button class="pipe-chip ${p === FIG_SEL.pipeline ? "sel" : ""}" data-pipe="${p}" data-tip="${esc(pLabel(p))}">${pShort(p)}</button>`).join("");
   $("#fig-modes").innerHTML = modes.map((m) =>
-    `<button class="pipe-chip ${m === FIG_SEL.mode ? "sel" : ""}" data-mode="${m}"${has(m) ? "" : " disabled"}>${MODE_SHORT[m]}</button>`).join("");
+    `<button class="pipe-chip ${m === FIG_SEL.mode ? "sel" : ""}" data-mode="${m}" data-tip="${esc(MODE_DESC[m])}"${
+      has(m) ? "" : " disabled"}>${MODE_SHORT[m]}</button>`).join("");
   renderFigures();
 }
 
@@ -1116,7 +1302,7 @@ function renderFigures() {
   if (embs.length) {
     const flex = (a) => ` style="flex: ${a} 1 0"`;
     html += `<div class="fig-row fig-head"><div class="fig-emb"></div><div class="fig-cells">
-      ${FIG_TYPES.map(([, label, a]) => `<div${flex(a)}>${label}</div>`).join("")}</div></div>`;
+      ${FIG_TYPES.map(([, label, a, tip]) => `<div${flex(a)}><span data-tip="${esc(tip)}">${label}</span></div>`).join("")}</div></div>`;
     for (const emb of embs) {
       const cells = FIG_TYPES.map(([type, , a]) => {
         const f = `${emb}_${type}.png`;
