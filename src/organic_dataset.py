@@ -22,6 +22,8 @@ if str(ROOT_DIR) not in sys.path:
 
 from pipeline_paths import DATA_DIR, DATASETS  # noqa: E402
 
+import progress  # src/progress.py: the marker lines the dashboard's bars read
+
 PIPELINE2_N_PER_SOURCE = 7000
 
 # BIPIA attack instruction pool is downloaded once and cached in the organic dataset's output directory.
@@ -509,13 +511,15 @@ def main():
 
     print("\n🚀 Pulling organic sources...")
     pools = {}
-    for key, meta in SOURCES.items():
+    for k, (key, meta) in enumerate(SOURCES.items()):
         n = pipeline3_targets[key]
+        progress.mark("pull", meta["display"], k, len(SOURCES))
         rows = meta["pull"](n, args.seed)
         if len(rows) < n:
             print(f"  ⚠️ Warning: only found {len(rows):,}/{n:,} usable rows for '{key}'")
         pools[key] = rows
 
+    progress.mark("build", "pipeline 3 (organic, self-injected)", 0, 2)
     print("\n🧩 Building pipeline 3 dataset (organic, each document clean + injected)...")
     pipeline3_rows = build_pipeline3(pools, rng, attack_pools,
                                      disjoint_attacks=disjoint_attacks,
@@ -531,6 +535,7 @@ def main():
               f"{len(tr & te)} shared  (0 = test attacks are unseen)")
     write_jsonl(pipeline3_rows, out_dir / DATASETS["pipeline3_organic_injected"])
 
+    progress.mark("build", "pipeline 2 (organic + BIPIA)", 1, 2)
     print("\n🧩 Building pipeline 2 dataset (organic benign + Alamsabi BIPIA malicious)...")
     pipeline2_rows = build_pipeline2(pools, rng, args.alamsabi_data, pipeline2_n)
     write_jsonl(pipeline2_rows, out_dir / DATASETS["pipeline2_organic_bipia"])

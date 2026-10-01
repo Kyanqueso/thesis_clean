@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import detect, paths, runs
+from app import detect, paths, runs, settings, vast
 from app.jobs import QUEUE, ValidationError
 
 APP_DIR = Path(__file__).resolve().parent
@@ -191,6 +191,31 @@ def cancel_job(job_id: str):
     if not QUEUE.cancel(job_id):
         raise HTTPException(400, "job not cancellable")
     return {"ok": True}
+
+
+# ---------------- settings ----------------
+
+@app.get("/api/settings")
+def get_settings():
+    return settings.public()
+
+
+@app.post("/api/settings")
+def post_settings(values: dict):
+    try:
+        settings.save(values)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return settings.public()
+
+
+@app.post("/api/settings/test/{what}")
+def test_settings(what: str):
+    if what == "openai":
+        return settings.test_openai()
+    if what == "vast":
+        return vast.test()
+    raise HTTPException(404, "unknown test")
 
 
 # ---------------- detect ----------------

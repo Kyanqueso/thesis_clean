@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>thesis_clean dashboard</title>
-<link rel="stylesheet" href="/static/style.css?v=44">
+<link rel="stylesheet" href="/static/style.css?v=45">
 </head>
 <body>
 <header>
@@ -24,6 +24,9 @@
     <button data-go="figures-card">Figures</button>
   </nav>
   <div id="queue-pill" class="pill">idle</div>
+  <button class="gear" id="b-settings" aria-label="Settings" title="Settings: OpenAI key, Vast.ai">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+  </button>
 </header>
 
 <main>
@@ -47,6 +50,9 @@
         <button class="choice" id="b-run-all">
           <b>Run all</b>
           <small>Every pipeline and ablation, on the full dataset.</small></button>
+        <button class="choice" id="b-full">
+          <b>Full pipeline</b>
+          <small>From nothing: download and clean the data, embed, train, summarise.</small></button>
         <button class="choice" id="b-advanced">
           <b>Advanced</b>
           <small>Choose exactly which runs to do.</small></button>
@@ -84,6 +90,7 @@
             <label class="chip-toggle"><input type="checkbox" id="f-save-models" checked><span>save models</span></label>
             <label class="chip-toggle"><input type="checkbox" id="f-skip-proj"><span>skip projections</span></label>
             <label class="chip-toggle"><input type="checkbox" id="f-force"><span>force re-embed</span></label>
+            <label class="chip-toggle" title="Embed qwen3 on the Vast.ai instance from Settings; everything else stays on this machine"><input type="checkbox" id="f-vast"><span>qwen3 on Vast.ai</span></label>
           </div>
         </div>
       </details>
@@ -102,14 +109,44 @@
       </div>
     </div>
 
+    <div class="step" data-step="4" hidden>
+      <h3 class="wiz-title">Full pipeline</h3>
+      <p class="wiz-sub">Everything, in order. It runs as one job, so you can leave it.</p>
+      <ol class="plan" id="full-plan"></ol>
+      <div class="adv-body">
+        <div class="checks emb-picker">
+          <label class="chip-toggle"><input type="checkbox" class="fp-model" value="minilm" checked><span>minilm</span></label>
+          <label class="chip-toggle"><input type="checkbox" class="fp-model" value="openai"><span>openai</span></label>
+          <label class="chip-toggle"><input type="checkbox" class="fp-model" value="qwen3"><span>qwen3</span></label>
+        </div>
+        <div class="checks">
+          <label class="chip-toggle" title="Embed qwen3 on the Vast.ai instance from Settings; everything else stays on this machine"><input type="checkbox" id="fp-vast"><span>qwen3 on Vast.ai</span></label>
+          <label class="chip-toggle" title="Leave alone any run whose results already cover the embeddings picked above"><input type="checkbox" id="fp-skip-done" checked><span>skip finished runs</span></label>
+          <label class="chip-toggle" title="Download and rebuild the datasets even if they are already on disk. Existing results were trained on the current files."><input type="checkbox" id="fp-rebuild"><span>rebuild datasets</span></label>
+          <label class="chip-toggle"><input type="checkbox" id="fp-force"><span>force re-embed</span></label>
+          <label class="chip-toggle"><input type="checkbox" id="fp-skip-proj"><span>skip projections</span></label>
+        </div>
+      </div>
+      <div class="step-nav">
+        <button class="linkback" data-back="1">Back</button>
+        <button class="btn primary" id="b-confirm-full">Start full pipeline</button>
+      </div>
+    </div>
+
     <div class="msg" id="launch-msg"></div>
   </div>
 
   <div class="card">
     <h2>Activity</h2>
     <div class="prog" id="prog" hidden>
-      <div class="prog-bar"><i id="prog-fill"></i></div>
-      <span class="prog-txt" id="prog-txt"></span>
+      <div class="prog-row">
+        <div class="prog-head"><span id="prog-lbl"></span><span class="prog-txt" id="prog-txt"></span></div>
+        <div class="prog-bar"><i id="prog-fill"></i></div>
+      </div>
+      <div class="prog-row" id="phase-row" hidden>
+        <div class="prog-head"><span id="phase-lbl"></span><span class="prog-txt" id="phase-txt"></span></div>
+        <div class="prog-bar thin"><i id="phase-fill"></i></div>
+      </div>
     </div>
     <div id="activity-line" class="act-line"></div>
     <div id="activity-recent"></div>
@@ -260,6 +297,52 @@
   <div id="peek-body"></div>
 </dialog>
 
+<!-- settings: saved to the gitignored .env by /api/settings; secrets never come back -->
+<dialog id="settings-dlg" aria-labelledby="settings-title">
+  <header>
+    <h3 id="settings-title">Settings</h3>
+    <button class="ghost" id="settings-close" aria-label="Close settings">&#10005;</button>
+  </header>
+  <form id="settings-form">
+    <fieldset>
+      <legend>OpenAI</legend>
+      <label class="field"><span>API key</span>
+        <input type="password" id="s-openai-key" autocomplete="off" spellcheck="false"></label>
+      <button type="button" class="ghost clear" data-clear="OPENAI_API_KEY" hidden>remove saved key</button>
+      <label class="field"><span>Tokens per minute limit <small>(blank = 1,000,000)</small></span>
+        <input type="number" id="s-openai-tpm" min="1" placeholder="1000000"></label>
+      <div class="set-test">
+        <button type="button" class="btn small" data-test="openai">Save and test</button>
+        <span class="msg" id="t-openai" role="status"></span>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Vast.ai <small>for qwen3 embeddings only</small></legend>
+      <label class="field"><span>SSH command <small>(copy it from the instance's Connect button)</small></span>
+        <input type="text" id="s-vast-ssh" spellcheck="false" placeholder="ssh -p 12345 root@ssh4.vast.ai"></label>
+      <label class="field"><span>Private key file <small>(blank = your default SSH key)</small></span>
+        <input type="text" id="s-vast-key" spellcheck="false" placeholder="C:\Users\you\.ssh\id_ed25519"></label>
+      <label class="field"><span>API key <small>(only needed for auto-stop)</small></span>
+        <input type="password" id="s-vast-api" autocomplete="off" spellcheck="false"></label>
+      <button type="button" class="ghost clear" data-clear="VAST_API_KEY" hidden>remove saved key</button>
+      <label class="field"><span>Instance ID <small>(blank = find it from the SSH command)</small></span>
+        <input type="text" id="s-vast-id" inputmode="numeric" spellcheck="false"></label>
+      <label class="set-check"><input type="checkbox" id="s-vast-autostop">
+        <span>Stop the instance when its embedding work ends, fails or is cancelled</span></label>
+      <div class="set-test">
+        <button type="button" class="btn small" data-test="vast">Save and test</button>
+        <span class="msg" id="t-vast" role="status"></span>
+      </div>
+    </fieldset>
+
+    <footer>
+      <span class="msg" id="settings-msg" role="status"></span>
+      <button type="submit" class="btn primary">Save</button>
+    </footer>
+  </form>
+</dialog>
+
 <!-- figure viewer: a figure opens here instead of a new tab; ← → step through the run -->
 <!-- autofocus on the dialog itself: otherwise showModal() focuses the first link
      and the "open in new tab" button opens already outlined -->
@@ -279,6 +362,6 @@
   </div>
 </dialog>
 
-<script src="/static/app.js?v=41"></script>
+<script src="/static/app.js?v=42"></script>
 </body>
 </html>
