@@ -1,11 +1,3 @@
-#!/usr/bin/env python
-"""
-Embedding Generation Script
-===========================
-This script generates embeddings by combining user intent and external content
-into a single text.
-"""
-
 import argparse
 import os
 import subprocess

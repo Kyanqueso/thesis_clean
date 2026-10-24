@@ -1,42 +1,3 @@
-#!/usr/bin/env python
-"""De-identify the AESLC email pool before it reaches any dataset.
-
-The emails are public (FERC released the Enron corpus; AESLC is the curated
-subset of it), so nothing here can stop someone finding an original — the
-original is public. What this does control is what THIS project stores, embeds,
-displays and hands around: no names, contact details or identifying numbers in
-data/, in the embeddings, on the dashboard, or in the thesis.
-
-Order of operations, and why:
-
-  1. residue sweep — attachment stubs and trailing legal disclaimers. These are
-     boilerplate the sender did not write, and the disclaimer block is dense
-     with switchboard numbers and office addresses. Cutting it first means
-     Presidio never has to be right about it.
-  2. Presidio — PERSON / EMAIL / PHONE / URL (the direct identifiers the ethics
-     protocol names) plus SSN, credit card and IBAN, and three recognizers the
-     stock engine has no idea about:
-       ENRON_INTERNAL_ADDRESS   Name/HOU/ECT@ECT  (name + business unit)
-       PHONE_EXTENSION          X35968, ext. 1234 (direct-dial reachability)
-       STREET_ADDRESS           number + street type, PO boxes
-  3. sign-off pass — a name alone on the line after "Thanks," or behind a dash.
-     NER reads those weakly because there is no sentence around them.
-
-Every detected span becomes a typed placeholder (<PERSON>, <EMAIL>, ...) rather
-than being deleted: the text keeps its shape, and a reader can see WHAT was
-removed, which is what makes the leak audit meaningful.
-
-LOCATION and DATE_TIME are off by default (--locations, --dates). Neither is a
-direct identifier, both fire constantly in business mail, and scrubbing every
-date would gut the text. Turn them on if the ethics reviewer asks for
-HIPAA-Safe-Harbor-style date removal.
-
-Usage:
-    python src/anonymize_enron.py audit                 # full 7,000-doc pool
-    python src/anonymize_enron.py audit --limit 300     # quick pass
-    python src/anonymize_enron.py audit --samples 25 --out scrubbed_samples.txt
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -50,7 +11,7 @@ ROOT_DIR = SCRIPT_DIR.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-# --- Patterns -------------------------------------------------------------
+# --- Patterns ---
 # Shared by the scrubber and the audit, so the thing that removes an artefact
 # and the thing that reports on it can never drift apart.
 
@@ -225,8 +186,7 @@ P_GREETING = re.compile(
 P_POSSESSIVE = re.compile(r"\b([A-Z][a-z]{2,15})['’]s\b")
 
 # Words that follow a greeting but name nobody, and given names that are
-# ordinary English. Kept deliberately short: over-scrubbing a real name is
-# cheap, under-scrubbing one is the failure this module exists to prevent.
+# ordinary English. 
 NAME_STOPLIST = {
     "all", "friends", "family", "team", "everyone", "everybody", "folks", "sir",
     "madam", "colleagues", "customer", "customers", "guys", "there", "gentlemen",
@@ -237,7 +197,7 @@ NAME_STOPLIST = {
     "bill", "mark", "rich", "grant", "will", "art", "chuck", "frank", "jack",
     "don", "rob", "buck", "sue", "gene", "hope", "faith", "max", "ray", "gay",
     "enron", "houston", "texas",
-    # sentence-initial words that take an apostrophe-s and are not people —
+    # sentence-initial words that take an apostrophe-s and are not people -
     # "Here's", "People's Corp" were both redacted before these were listed
     "here", "there", "this", "that", "what", "who", "where", "when", "it",
     "let", "today", "tomorrow", "yesterday", "tonight", "everyone", "someone",
@@ -403,8 +363,7 @@ def scrub(text: str, entities: tuple[str, ...] = BASE_ENTITIES,
 def deidentify_email(body: str, subject: str,
                      entities: tuple[str, ...] = BASE_ENTITIES,
                      vocab: re.Pattern | None = None) -> tuple[str, str]:
-    """One email, cleaned then scrubbed. The subject goes through the same pass:
-    it becomes the user_intent column, and subjects name people too."""
+    #One email, cleaned then scrubbed. The subject goes through the same pass
     return (scrub(clean_residue(body), entities, vocab),
             scrub(subject, entities, vocab))
 

@@ -1,30 +1,3 @@
-#!/usr/bin/env python
-"""
-Model Training, Evaluation, and Visualization Script
-=====================================================
-This script trains machine learning classifiers on pre-generated text embeddings.
-It evaluates their performance, generates comprehensive visualizations (including
-dimensionality reduction plots and performance curves), and saves all results.
-
-Metrics reported per (embedding x classifier) configuration:
-
-  Detection quality  accuracy, precision, recall, specificity, F1, ROC-AUC,
-                     PR-AUC (average precision), and the raw confusion matrix
-                     (TN/FP/FN/TP) at the 0.5 decision threshold.
-  Degradation        absolute performance degradation ACROSS THE ABLATION RUNS
-                     (normal / user_intent_only / context_only), matched on
-                     (embedding, classifier): how much accuracy is lost when the
-                     model sees only the context, or only the intent?
-  Significance       McNemar tests, Holm-Bonferroni corrected, in two places —
-                     between every configuration inside this run, and across the
-                     ablation modes for each matched configuration. Both are
-                     legitimate because the compared models score the same test
-                     rows; the cross-mode one asserts that rather than assuming.
-  Cost               wall time (time.perf_counter), CPU-seconds and peak RSS
-                     (psutil), GPU VRAM attributable to this process (pynvml),
-                     and a single-sample inference latency distribution.
-"""
-
 import argparse
 import warnings
 import faulthandler

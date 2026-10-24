@@ -1,15 +1,3 @@
-#!/usr/bin/env python
-"""
-Pipeline Orchestrator
-======================
-Runs all 3 pipelines (Alamsabi, organic+BIPIA, organic+self-injected) x 3 ablation
-modes (normal, user_intent_only, context_only) — 9 runs total — each as
-generate_embeddings.py -> train_evaluate_visualize.py, writing into its own
-runs/{pipeline}/{mode}/{embeddings,results,figures}/ folder. After all 9 runs
-complete, aggregates every run's full_evaluation_results.csv into one master
-comparison table at runs/all_pipelines_summary.{csv,html}.
-"""
-
 import argparse
 import subprocess
 import sys

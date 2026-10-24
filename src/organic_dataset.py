@@ -226,27 +226,7 @@ def pull_cosqa(n: int, seed: int) -> list[dict]:
 
 
 def pull_aeslc(n: int, seed: int, deidentify: bool = True) -> list[dict]:
-    """Emails from AESLC (Zhang and Tetreault, ACL 2019) rather than the raw
-    Enron corpus.
 
-    Both are Enron mail, but AESLC is the curated subset: its authors kept only
-    inbox/sent messages, stripped boilerplate the sender did not write, dropped
-    replies and forwards so a body always matches its own subject, and required
-    at least 3 sentences and 25 words. The raw corpus used before carried all of
-    that — 46.6% of the rows it gave us were replies or forwards, some with a
-    bare "RE:" as the user intent.
-
-    AESLC is NOT de-identified at source: bodies still name people and carry
-    phone numbers and addresses. Every email is therefore cleaned and scrubbed
-    here, before dedup and before anything downstream sees it, so no raw email
-    text reaches data/, the embeddings or the dashboard. `deidentify=False` is
-    for the audit tool only, which needs the before/after pair.
-
-    18,302 emails over the three splits, which are combined here: the subject
-    line generation split is irrelevant to injection detection, and one pool of
-    ~15.6k usable emails covers the 7,000 target. doc_ids are positional, so
-    they carry no pointer back to a source record.
-    """
     print(f"  Pulling AESLC email (target {n:,} rows)...")
     ds = load_dataset("Yale-LILY/aeslc")
     combined = concatenate_datasets([ds[s] for s in ("train", "validation", "test")])
@@ -255,7 +235,7 @@ def pull_aeslc(n: int, seed: int, deidentify: bool = True) -> list[dict]:
     order = list(range(len(combined)))
     random.Random(seed).shuffle(order)
 
-    # Raw candidates first — filtering is cheap, de-identification is not, and
+    # Raw candidates first - filtering is cheap, de-identification is not, and
     # the name vocabulary has to see the whole pool at once. The margin covers
     # the few emails that fall under the length floor once a disclaimer is cut.
     candidates = []
@@ -319,14 +299,7 @@ def pull_cnn_dailymail(n: int, seed: int) -> list[dict]:
     return _topup(rows, dupes, n, "CNN/DailyMail")
 
 
-# --- Source Datasets (Organic) ---
-# attack_kind picks which BIPIA pool a source's injections come from: prose gets
-# text attacks, CoSQA gets BIPIA's code attacks (a text attack appended to a
-# Python function is not what a code-assistant injection looks like).
-# pipeline3_n is a DOCUMENT target: each document becomes two rows (clean +
-# injected), so 7,000 docs/source -> 14,000 rows/source. Pools prefer distinct
-# documents and only repeat when a source runs dry — CoSQA has ~6,130 distinct
-# functions, so ~870 of its 7,000 are repeats (see _topup).
+# Source Datasets (Organic)
 SOURCES = {
     "ms_marco": {"display": "MS MARCO v2.1", "pipeline3_n": 7000, "pull": pull_ms_marco, "attack_kind": "text"},
     "fetaqa": {"display": "FeTaQA", "pipeline3_n": 7000, "pull": pull_fetaqa, "attack_kind": "text"},
@@ -375,7 +348,7 @@ def build_pipeline3(pools: dict, rng: random.Random, attack_pools: dict,
       draws only from its own BIPIA pool (25 train types vs 24 test types, zero
       overlap). The assignment is written to a `split` column that
       train_evaluate_visualize.py honors, so the run measures generalization to
-      attack types the model has NEVER seen — the deployment condition.
+      attack types the model has NEVER seen - the deployment condition.
     - False (--merged-attacks): every document draws from BIPIA's train AND test
       pools combined, so test attacks are also seen during training. Only useful
       as the "known attacks" comparison run.

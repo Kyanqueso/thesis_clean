@@ -1,5 +1,3 @@
-"""Download the Alamsabi BIPIA+GPT dataset into this machine's data tree."""
-
 import argparse
 import json
 import sys
