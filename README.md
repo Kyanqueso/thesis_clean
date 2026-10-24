@@ -54,6 +54,18 @@ Keep the versions in `requirements.txt` exactly as they are. The shared models w
 saved with scikit-learn 1.7.1, xgboost 3.0.4, lightgbm 4.7.0, numpy 2.2.6 and
 joblib 1.5.3, and they may fail to load with other versions.
 
+**Optional, NVIDIA GPUs only (Windows / Linux):** `requirements.txt` installs the
+CPU-only build of PyTorch. To run the local embedding models (MiniLM, Qwen3) on the
+GPU, which is much faster, reinstall torch from the CUDA index (~3 GB download):
+
+```powershell
+venv\Scripts\python.exe -m pip install --force-reinstall --no-deps torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+```
+
+On Linux use `venv/bin/python` instead. Check it worked with
+`venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available())"`, which
+should print `True`. Skip this step on Macs and machines without an NVIDIA GPU.
+
 ## 3. Get the data, runs and models (Google Drive)
 
 `data/` and `runs/` are too big for git (they're gitignored), so they're on the team

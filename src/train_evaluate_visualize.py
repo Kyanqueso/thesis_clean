@@ -20,6 +20,7 @@ except ImportError:
 # which is the difference between a guess and a diagnosis. stderr is unbuffered,
 # so the dump survives even when buffered stdout is lost.
 faulthandler.enable(all_threads=True)
+import progress  # src/progress.py: the marker lines the dashboard's bars read
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -966,6 +967,7 @@ def main():
     emb_dims = {}
 
     # Process each embedding file
+    n_fits, fits_done = len(available_embeddings) * len(classifiers), 0
     for emb_name, emb_path in available_embeddings.items():
         print(f"\n{'='*70}\n🚀 Processing Embeddings: {emb_name.upper()}\n{'='*70}")
         
@@ -974,11 +976,14 @@ def main():
         emb_dims[emb_name] = int(embeddings.shape[1])
 
         if not args.skip_projections:
+            progress.mark("project", emb_name)
             plot_dimensionality_reduction(embeddings, y, emb_name, FIGURES_DIR)
         
         trained_models = {}
         confusion_matrices = {}
         for clf_name, classifier in classifiers.items():
+            progress.mark("train", f"{emb_name} · {clf_name}", fits_done, n_fits)
+            fits_done += 1
             result, trained_model, y_prob, y_pred = train_evaluate(
                 X_train, y_train, X_test, y_test, classifier, clf_name,
                 latency_repeats=args.latency_repeats)
@@ -994,6 +999,8 @@ def main():
 
         plot_roc_pr_curves(X_test, y_test, trained_models, emb_name, FIGURES_DIR)
         plot_confusion_matrices(confusion_matrices, emb_name, FIGURES_DIR)
+
+    progress.mark("report", "tables, significance tests, figures")
 
     # --- Final Results Processing ---
     if not all_results:

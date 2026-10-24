@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+import progress  # src/progress.py: the marker lines the dashboard's bars read
+
 # Attempt to import required libraries and provide guidance on failure.
 try:
     import torch
@@ -136,9 +138,40 @@ def get_tokenizer(model_id: str) -> tiktoken.Encoding:
         print(f"⚠️ Warning: Tokenizer for '{model_id}' not found. Using 'cl100k_base'.")
         return tiktoken.get_encoding("cl100k_base")
 
-def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_type: str, dtype: str = None, max_seq_length: int = None) -> np.ndarray:
+def _report_sbert_batches(item: str) -> None:
+    """Make SentenceTransformer.encode() report its batch loop as progress.
+
+    encode() has no callback, and chunking the texts ourselves would change the
+    batch composition (so the padding, so the float16 results). Wrapping the
+    trange it iterates leaves the computation untouched. The module moved
+    between releases; when none matches, the run simply has no inner bar.
+    """
+    import importlib
+    for name in ("sentence_transformers.sentence_transformer.model",
+                 "sentence_transformers.SentenceTransformer"):
+        try:
+            mod = importlib.import_module(name)
+        except ImportError:
+            continue
+        orig = getattr(mod, "trange", None)
+        if orig is None:
+            continue
+
+        def trange(*args, **kwargs):
+            bar = orig(*args, **kwargs)
+            if kwargs.get("desc") != "Batches":
+                return bar
+            return progress.track(bar, "embed", item, total=len(bar))
+
+        mod.trange = trange
+        return
+
+
+def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_type: str, dtype: str = None, max_seq_length: int = None, item: str = "") -> np.ndarray:
 
     if embed_type == 'sbert':
+        progress.mark("load", item)
+        _report_sbert_batches(item)
         model_kwargs = {"torch_dtype": getattr(torch, dtype)} if dtype else None
         model = SentenceTransformer(model_id, model_kwargs=model_kwargs)
         if max_seq_length:
@@ -159,7 +192,8 @@ def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_
         # Tokenize once: we need the counts to pace against the TPM limit anyway,
         # and truncating up front means no request can exceed the model's window.
         prepared, counts, n_truncated = [], [], 0
-        for t in tqdm(texts, desc="Tokenizing", leave=False):
+        for t in progress.track(tqdm(texts, desc="Tokenizing", leave=False),
+                                "tokenize", item, total=len(texts)):
             t = t if t and t.strip() else " "   # the API rejects empty strings
             ids = tokenizer.encode(t)
             if len(ids) > OPENAI_MAX_TOKENS:
@@ -178,7 +212,8 @@ def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_
               f"→ ~{floor_min:.1f} min minimum")
 
         all_embeddings = []
-        for a, b in tqdm(spans, desc=f"OpenAI ({model_id})"):
+        for a, b in progress.track(tqdm(spans, desc=f"OpenAI ({model_id})"),
+                                   "embed", item, total=len(spans)):
             budget.take(sum(counts[a:b]))          # wait if we would exceed the cap
             response = _embed_batch(prepared[a:b], model_id)
             all_embeddings.extend(r.embedding for r in response.data)
@@ -308,9 +343,26 @@ def main():
                 "--models", key,
                 "--_single", key,
             ]
+            cwd = None
+            # qwen3 needs a GPU; the dashboard sets this to embed on the Vast.ai
+            # instance from Settings instead (app/vast.py uploads the data, runs
+            # this same script there and downloads the .npy). Cache, --force
+            # and the failure summary below all stay in this one loop.
+            if key == "qwen3" and os.environ.get("THESIS_QWEN3_REMOTE", "") not in ("", "0"):
+                if args.separator != parser.get_default("separator"):
+                    print("❌ Error: a custom --separator is not supported for remote qwen3.")
+                    return 1
+                print("    (running on the Vast.ai instance)")
+                cmd = [
+                    sys.executable, "-u", "-m", "app.vast", "embed",
+                    "--data", str(args.data.resolve()),
+                    "--mode", args.mode,
+                    "--embed-dir", str(EMBED_DIR.resolve()),
+                ]
+                cwd = ROOT_DIR
             if args.force:
                 cmd.append("--force")
-            result = subprocess.run(cmd)
+            result = subprocess.run(cmd, cwd=cwd)
             if result.returncode != 0:
                 print(f"  ❌ Subprocess for '{key}' exited with code {result.returncode}.")
 
@@ -403,7 +455,8 @@ def main():
                 batch_size=config["batch_size"],
                 embed_type=config["embed_type"],
                 dtype=config.get("dtype"),
-                max_seq_length=config.get("max_seq_length")
+                max_seq_length=config.get("max_seq_length"),
+                item=key,
             )
             
             np.save(output_path, embeddings)

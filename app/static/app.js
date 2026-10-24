@@ -283,7 +283,7 @@ function renderStartup() {
   const nEmb = STATE.runs.filter((r) => Object.values(r.embeddings).some(Boolean)).length;
   const files = `<button class="tablink" data-goto="files">files</button>`;
   $("#startup").innerHTML = [
-    `Add the dataset (${nData}/${ds.length}). Check ${files}.`,
+    `Add the dataset (${nData}/${ds.length}). Check ${files}, or let <b>Full pipeline</b> build it.`,
     `Add embeddings (${nEmb}/${STATE.runs.length}). Check ${files}.`,
     "Press <b>Run</b> and pick what to train.",
   ].map((t) => `<li>${t}</li>`).join("");
@@ -367,6 +367,7 @@ function runParams() {
     force: $("#f-force").checked,
     save_models: $("#f-save-models").checked,
     skip_projections: $("#f-skip-proj").checked,
+    qwen3_remote: $("#f-vast").checked,
   };
   // a row limit is what makes it a smoke test, and the backend reroutes those
   // to a separate folder so they cannot overwrite delivered results
@@ -383,11 +384,68 @@ function runParams() {
 function goStep(n) {
   $$(".step").forEach((s) => (s.hidden = +s.dataset.step !== n));
   $("#wiz-dots").hidden = n === 0;
-  $$("#wiz-dots i").forEach((d, i) => d.classList.toggle("on", i < n));
+  const pos = n === 4 ? 2 : n;   // the full-pipeline form sits where "pick" does
+  $$("#wiz-dots i").forEach((d, i) => d.classList.toggle("on", i < pos));
   launchMsg("");
   if (n === 2) { renderMatrix(); updateReviewBtn(); }
   if (n === 3) renderReview();
+  if (n === 4) renderFullPlan();
 }
+
+/* ---- full pipeline ---- */
+function fullParams() {
+  return {
+    models: $$(".fp-model").filter((c) => c.checked).map((c) => c.value).join(","),
+    qwen3_remote: $("#fp-vast").checked,
+    skip_done: $("#fp-skip-done").checked,
+    rebuild_data: $("#fp-rebuild").checked,
+    force: $("#fp-force").checked,
+    skip_projections: $("#fp-skip-proj").checked,
+    save_models: true,
+  };
+}
+
+/* The plan is read off the same /api/state the backend decides from, so what
+   it says will be skipped is what build_cmds skips. */
+function renderFullPlan() {
+  if (!STATE) return;
+  const p = fullParams();
+  const has = (k) => !!(STATE.datasets[k] && STATE.datasets[k].info);
+  const data = (what, there) => `<li>${what}
+    <span class="muted">${there && !p.rebuild_data ? "already on disk, kept" : "will run"}</span></li>`;
+  $("#full-plan").innerHTML =
+    data("Download the Alamsabi dataset.", has("pipeline1_alamsabi"))
+    + data("Build the organic datasets: collect sources, clean and de-identify the emails.",
+        has("pipeline2_organic_bipia") && has("pipeline3_organic_injected"))
+    + `<li>Embed all 9 runs with ${esc(p.models.replaceAll(",", ", ") || "nothing picked")}.
+        <span class="muted">${p.force ? "recomputed" : "existing embeddings are reused"}${
+          p.qwen3_remote ? "; qwen3 on Vast.ai" : ""}</span></li>
+       <li>Train and evaluate all 9 runs.
+        <span class="muted">${p.skip_done && !p.force ? "finished runs are skipped" : "every run is retrained"}</span></li>
+       <li>Build the summary table.</li>`;
+  $("#b-confirm-full").disabled = !p.models;
+}
+$$("#tab-runs [data-step='4'] input").forEach((i) => i.addEventListener("change", renderFullPlan));
+
+// qwen3 on Vast.ai means nothing unless qwen3 is one of the embeddings
+for (const [vastBox, models] of [["#f-vast", ".f-model"], ["#fp-vast", ".fp-model"]]) {
+  $(vastBox).addEventListener("change", () => {
+    if (!$(vastBox).checked) return;
+    $$(models).find((c) => c.value === "qwen3").checked = true;
+    if (vastBox === "#fp-vast") renderFullPlan();
+  });
+}
+
+$("#b-full").addEventListener("click", () => goStep(4));
+$("#b-confirm-full").addEventListener("click", () => {
+  if (!STATE) return;
+  if (!confirm("This runs the whole pipeline and can take many hours. Continue?")) return;
+  LAST_RUN_KEYS = new Set();
+  for (const p of Object.keys(STATE.pipelines))
+    for (const m of STATE.modes) LAST_RUN_KEYS.add(`${p}|${m}`);
+  queueJob("full", fullParams());
+  goStep(0);
+});
 
 function renderReview() {
   const p = runParams();
@@ -477,6 +535,7 @@ $("#b-show-analysis").addEventListener("click", () =>
 /* -------- activity strip -------- */
 const jobLabel = (j) =>
   j.stage === "sweep" ? "all 9 runs" :
+  j.stage === "full" ? "full pipeline" :
   j.stage === "dataset" ? `dataset: ${j.params.which}` :
   j.stage === "run" ? `${pShort(j.params.pipeline)} / ${MODE_SHORT[j.params.mode]}` : j.stage;
 
@@ -544,26 +603,49 @@ async function refreshJobs() {
   }
 }
 
-/* ponytail: progress is a STEP COUNT scraped from markers the pipeline already
-   prints — ">>> label" per step in a sweep, "$ cmd" per step otherwise. Nothing
-   in the job API reports a percentage, so the bar moves in whole steps and the
-   estimate is a linear extrapolation. Replace both the moment a job exposes
-   real progress. */
+/* Progress comes from the job itself (/api/jobs → progress): the scripts print
+   ##step / ##progress marker lines and the server folds them into a step count
+   plus where the current step is. The time estimate is still a straight-line
+   extrapolation over steps of very different lengths, so treat it as rough. */
 const fmtDur = (s) => (s >= 3600 ? `${Math.round(s / 360) / 10}h`
   : s >= 60 ? `${Math.round(s / 60)}m` : `${s}s`);
+
+const PHASE_NAME = {
+  download: "Downloading", write: "Writing", pull: "Collecting sources",
+  anonymize: "Cleaning and de-identifying", build: "Building dataset",
+  load: "Loading model", tokenize: "Tokenizing", embed: "Embedding",
+  connect: "Connecting to", upload: "Uploading to Vast.ai", setup: "Setting up",
+  project: "Projections", train: "Training", report: "Writing results",
+};
+const stepName = (label) => label
+  .replace(/pipeline(\d)_\w+/, "P$1")
+  .replace("user_intent_only", "intent-only").replace("context_only", "context-only")
+  .replace("generate_embeddings", "embeddings").replace("train_evaluate_visualize", "training");
 
 function renderProgress(job) {
   const box = $("#prog");
   if (!job) { box.hidden = true; return; }
-  const total = job.stage === "sweep" ? 18 : ((job.cmds || []).length || 2);
-  const started = (LOG_TEXT.match(job.stage === "sweep" ? /^>>> /gm : /^\$ /gm) || []).length;
-  const done = Math.max(0, Math.min(total, started - 1));   // a marker means STARTED
-  const frac = total ? done / total : 0;
+  const p = job.progress || {};
+  const ph = p.phase;
+  const total = p.steps || 1;
+  const inner = ph && ph.total ? Math.min(1, ph.done / ph.total) : 0;
+  const frac = Math.min(1, (Math.max(0, (p.step || 0) - 1) + inner) / total);   // a step marker means STARTED
   const elapsed = Math.max(0, Date.now() / 1000 - job.started);
   const left = frac > 0.02 ? Math.round(elapsed * (1 - frac) / frac) : null;
   box.hidden = false;
+  $("#prog-lbl").textContent = p.label ? stepName(p.label) : "Starting…";
   $("#prog-fill").style.width = `${Math.round(frac * 100)}%`;
-  $("#prog-txt").textContent = `${done}/${total}` + (left ? ` · ~${fmtDur(left)} left` : "");
+  $("#prog-txt").textContent = `step ${Math.min(Math.max(1, p.step || 0), total)} of ${total}`
+    + (left ? ` · ~${fmtDur(left)} left` : "");
+
+  $("#phase-row").hidden = !ph;
+  if (!ph) return;
+  $("#phase-lbl").textContent = (PHASE_NAME[ph.phase] || ph.phase) + (ph.item ? ` · ${ph.item}` : "");
+  $("#phase-fill").classList.toggle("indet", !ph.total);
+  $("#phase-fill").style.width = `${Math.round(inner * 100)}%`;
+  $("#phase-txt").textContent = ph.total
+    ? `${ph.done.toLocaleString()} / ${ph.total.toLocaleString()} · ${Math.round(inner * 100)}%`
+    : "working…";
 }
 
 async function loadPreview() {
@@ -1669,6 +1751,74 @@ async function loadPeek() {
 $("#pk-resample").addEventListener("click", loadPeek);
 $("#pk-pipeline").addEventListener("change", loadPeek);
 $("#pk-n").addEventListener("change", loadPeek);
+
+/* ================= settings ================= */
+const SET_INPUT = {
+  OPENAI_API_KEY: "#s-openai-key", OPENAI_TPM: "#s-openai-tpm",
+  VAST_SSH: "#s-vast-ssh", VAST_SSH_KEY: "#s-vast-key",
+  VAST_API_KEY: "#s-vast-api", VAST_INSTANCE_ID: "#s-vast-id",
+};
+const SET_SECRET = ["OPENAI_API_KEY", "VAST_API_KEY"];
+
+function fillSettings(cur) {
+  for (const [name, sel] of Object.entries(SET_INPUT)) {
+    const el = $(sel);
+    if (!SET_SECRET.includes(name)) { el.value = cur[name].value; continue; }
+    // a secret never comes back: show that one is saved, and its last characters
+    el.value = "";
+    el.placeholder = cur[name].set ? `saved (${cur[name].value}) · type to replace` : "not set";
+    $(`[data-clear="${name}"]`).hidden = !cur[name].set;
+  }
+  // on by default until an API key exists, so adding the key is all it takes
+  $("#s-vast-autostop").checked = cur.VAST_AUTO_STOP.value === "1" || !cur.VAST_API_KEY.set;
+}
+
+function setMsg(sel, text, cls = "") {
+  $(sel).textContent = text;
+  $(sel).className = "msg " + cls;
+}
+
+async function saveSettings(extra = {}) {
+  const body = { VAST_AUTO_STOP: $("#s-vast-autostop").checked ? "1" : "", ...extra };
+  for (const [name, sel] of Object.entries(SET_INPUT)) {
+    const v = $(sel).value.trim();
+    if (SET_SECRET.includes(name) && !v) continue;   // blank = leave the saved one alone
+    body[name] = v;
+  }
+  try {
+    fillSettings(await fetchJSON("/api/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }));
+    setMsg("#settings-msg", "Saved. The next job uses these.", "ok");
+    return true;
+  } catch (e) {
+    setMsg("#settings-msg", String(e.message || e), "error");
+    return false;
+  }
+}
+
+$("#b-settings").addEventListener("click", async () => {
+  for (const m of ["#settings-msg", "#t-openai", "#t-vast"]) setMsg(m, "");
+  $("#settings-dlg").showModal();
+  try { fillSettings(await fetchJSON("/api/settings")); }
+  catch (e) { setMsg("#settings-msg", String(e.message || e), "error"); }
+});
+$("#settings-close").addEventListener("click", () => $("#settings-dlg").close());
+$("#settings-form").addEventListener("submit", (e) => { e.preventDefault(); saveSettings(); });
+$$("[data-clear]").forEach((b) => b.addEventListener("click", () => saveSettings({ [b.dataset.clear]: "" })));
+// the test runs against what is saved, so save first: testing a typed-but-unsaved
+// key would pass and then the job would use the old one
+$$("[data-test]").forEach((b) => b.addEventListener("click", async () => {
+  const out = `#t-${b.dataset.test}`;
+  if (!(await saveSettings())) return setMsg(out, "");
+  setMsg(out, "testing…");
+  b.disabled = true;
+  try {
+    const r = await fetchJSON(`/api/settings/test/${b.dataset.test}`, { method: "POST" });
+    setMsg(out, r.detail, r.ok ? "ok" : "error");
+  } catch (e) { setMsg(out, String(e.message || e), "error"); }
+  b.disabled = false;
+}));
 
 /* ================= boot & polling ================= */
 /* Simulation is the landing tab, so its model list must load at boot: the

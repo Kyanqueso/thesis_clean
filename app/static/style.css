@@ -403,14 +403,68 @@ button.pipe-chip:disabled { opacity: 0.35; cursor: not-allowed; border-color: va
 .adv-row { display: flex; gap: 14px; }
 .adv-row .field input { width: 110px; }
 
-/* progress: a step count, so it moves in visible jumps rather than creeping */
-.prog { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-.prog-bar { flex: 1; height: 6px; background: var(--grid); border-radius: 999px; overflow: hidden; }
+/* progress: the job's steps on top, the current step's own progress under it */
+.prog { margin-bottom: 14px; }
+.prog-row + .prog-row { margin-top: 10px; }
+.prog-head {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+  font-size: 12.5px; color: var(--ink-2); margin-bottom: 5px;
+}
+.prog-bar { height: 6px; background: var(--grid); border-radius: 999px; overflow: hidden; }
+.prog-bar.thin { height: 4px; }
 .prog-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.4s; }
+/* a phase that cannot say how far along it is (a download, a model load) */
+.prog-bar i.indet { width: 30% !important; transition: none; animation: indet 1.4s ease-in-out infinite; }
+@keyframes indet { from { margin-left: -30%; } to { margin-left: 100%; } }
+@media (prefers-reduced-motion: reduce) {
+  .prog-bar i.indet { animation: none; width: 100% !important; opacity: 0.35; }
+}
 .prog-txt {
   font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
-  min-width: 122px; text-align: right;
+  white-space: nowrap; text-align: right;
 }
+
+/* full pipeline: what will happen, in order */
+.plan {
+  width: fit-content; max-width: 62ch; margin: 0 auto 20px; padding-left: 1.5em;
+  text-align: left; display: flex; flex-direction: column; gap: 6px;
+  font-size: 13.5px; color: var(--ink-2);
+}
+.plan li::marker { color: var(--muted); }
+.plan .muted { font-size: 12.5px; }
+
+/* ---------------- settings ---------------- */
+.gear {
+  background: none; border: none; color: var(--ink-2); cursor: pointer;
+  padding: 5px; border-radius: 7px; display: flex;
+}
+.gear:hover { color: var(--accent); background: var(--card2); }
+.gear svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+#settings-dlg {
+  width: min(560px, 94vw); max-height: 90vh; padding: 0; overflow: hidden;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--card); color: var(--text); font: inherit;
+  display: flex; flex-direction: column;
+}
+#settings-dlg:not([open]) { display: none; }
+#settings-dlg::backdrop { background: rgba(0, 0, 0, 0.62); }
+#settings-dlg header { position: static; padding: 12px 16px; }
+#settings-dlg header h3 { margin: 0; font-size: 15px; flex: 1; }
+#settings-form { padding: 4px 16px 16px; overflow: auto; }
+#settings-form fieldset {
+  border: 1px solid var(--border); border-radius: 9px; margin: 14px 0 0; padding: 8px 14px 12px;
+}
+#settings-form legend { font-size: 13px; font-weight: 650; padding: 0 6px; }
+#settings-form small { font-weight: 400; color: var(--muted); }
+#settings-form .field { margin: 8px 0 0; }
+#settings-form .field input { width: 100%; }
+#settings-form .clear { margin: 2px 0 0; padding-left: 0; display: block; }
+.set-check { display: flex; gap: 8px; align-items: flex-start; margin-top: 12px; font-size: 13px; color: var(--ink-2); cursor: pointer; }
+.set-check input { margin-top: 3px; accent-color: var(--accent); }
+.set-test { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.set-test .msg { padding: 0; overflow-wrap: anywhere; }
+#settings-form footer { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 16px; }
+#settings-form footer .msg { padding: 0; margin-right: auto; overflow-wrap: anywhere; }
 #results-preview .btn { margin-top: 12px; }
 
 details.adv { margin-top: 18px; }

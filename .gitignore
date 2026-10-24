@@ -37,6 +37,8 @@ Thesis Artifacts/
 
 /thesis4-master
 
+/simulation_test_cases/
+
 # browser-automation scratch output
 .playwright-mcp/
 vastai/

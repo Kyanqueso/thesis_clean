@@ -427,7 +427,10 @@ def scrub_pool(pairs: list[tuple[str, str]], entities: tuple[str, ...] = BASE_EN
     from tqdm import tqdm
 
     cleaned = [(clean_residue(b), s) for b, s in pairs]
-    it = tqdm(cleaned, desc="Presidio") if progress else cleaned
+    it = cleaned
+    if progress:
+        from progress import track   # the dashboard's bar; tqdm stays for the terminal
+        it = track(tqdm(cleaned, desc="Presidio"), "anonymize", "emails", total=len(cleaned))
     detected = [((b, detect(b, entities)), (s, detect(s, entities))) for b, s in it]
 
     vocab = None

@@ -16,13 +16,16 @@ args = parser.parse_args()
 
 from datasets import load_dataset  # heavy, and not needed for --help
 
+import progress  # src/progress.py: the marker lines the dashboard's bars read
+
 out_path = args.out_dir / DATASETS["pipeline1_alamsabi"]
 out_path.parent.mkdir(parents=True, exist_ok=True)
 
+progress.mark("download", "Alamsabi BIPIA+GPT")
 dataset = load_dataset("MAlmasabi/Indirect-Prompt-Injection-BIPIA-GPT")
 
 with open(out_path, "w", encoding="utf-8") as f:
-    for item in dataset["train"]:
+    for item in progress.track(dataset["train"], "write", out_path.name):
         json.dump(item, f)
         f.write("\n")
 
