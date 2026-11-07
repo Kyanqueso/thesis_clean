@@ -3,29 +3,22 @@
 pipeline_paths.py (repo root) decides *where* the dataset and run trees are on
 this machine; this module adds what only the dashboard needs: the single-segment
 prefixes the file explorer addresses paths by, and the write-side run dirs.
-
-Resolution is re-checked while the server runs rather than frozen at import.
-The dashboard is what people point at freshly delivered artifacts, and dropping
-a runs/ folder into the repo while the server is up is the normal way that
-happens — the old behaviour answered "no results" until someone thought to
-restart. ensure_current() re-resolves only when the tree it is holding stopped
-looking like one, so the steady state costs nine is_dir() calls.
 """
 
 from __future__ import annotations
 
 import sys
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:  # importable however the server was started
     sys.path.insert(0, str(ROOT))
 
-from pipeline_paths import (  # noqa: E402
-    DATA_CANDIDATES, RUNS_CANDIDATES, SMOKE_SUBDIR, SUMMARY_FILES,
-    env_dir, is_data_tree, is_runs_tree, resolve_tree,
-)
+import pipeline_paths  # noqa: E402
+from pipeline_paths import SMOKE_SUBDIR  # noqa: E402
+
+# the sweep no longer writes an aggregate summary
+SUMMARY_FILES: tuple[str, ...] = ()
 
 # Set by _apply() below, and again whenever the trees move. Read them through
 # the module (paths.RUNS_DIR), never `from app.paths import RUNS_DIR` — a
@@ -44,24 +37,17 @@ INSPECT_ROOTS: dict[str, Path]
 # one prefix exposes those two files only, never the rest of the root
 ROOT_PREFIX = "root"
 
-# an unresolved tree is re-probed no more often than this (the probe walks the
-# repo root two deep, which is cheap but not free at a 5s poll)
-RECHECK_SECONDS = 10.0
-_last_probe = 0.0
-
 
 def _apply() -> None:
     """Resolve both trees and rebuild everything derived from them."""
     global DATA_DIR, DATA_SOURCE, RUNS_DIR, RUNS_SOURCE, RUNS_WRITE_DIR
     global DATA_PREFIX, RUNS_PREFIX, WRITE_PREFIX, INSPECT_ROOTS
 
-    DATA_DIR, DATA_SOURCE = resolve_tree("THESIS_DATA_DIR", DATA_CANDIDATES, is_data_tree)
-    RUNS_DIR, RUNS_SOURCE = resolve_tree("THESIS_RUNS_DIR", RUNS_CANDIDATES, is_runs_tree)
+    DATA_DIR, DATA_SOURCE = pipeline_paths.DATA_DIR, "data/ or THESIS_DATA_DIR"
+    RUNS_DIR, RUNS_SOURCE = pipeline_paths.RUNS_DIR, "runs/ or THESIS_RUNS_DIR"
 
-    # runs launched from the dashboard write here: the tree we read from, so
-    # there is one place to look. Override only to keep delivered artifacts
-    # pristine.
-    RUNS_WRITE_DIR = env_dir("THESIS_RUNS_WRITE_DIR") or RUNS_DIR
+    # runs launched from the dashboard write to the tree we read from
+    RUNS_WRITE_DIR = RUNS_DIR
 
     # Path prefixes the UI shows and the file explorer accepts. Single segments,
     # so they stay stable when a tree lives outside the repo root.
@@ -94,21 +80,8 @@ def refresh() -> bool:
 
 
 def ensure_current() -> bool:
-    """Re-resolve if what we are holding no longer looks like the right tree.
-
-    Called from the read paths the UI polls. A healthy tree short-circuits on
-    the content check, so the common case does no directory walking; only a
-    missing or emptied tree pays for a probe, and then at most every
-    RECHECK_SECONDS.
-    """
-    global _last_probe
-    if is_runs_tree(RUNS_DIR) and is_data_tree(DATA_DIR):
-        return False
-    now = time.monotonic()
-    if now - _last_probe < RECHECK_SECONDS:
-        return False
-    _last_probe = now
-    return refresh()
+    """The trees are fixed by pipeline_paths, so there is nothing to re-resolve."""
+    return False
 
 
 def summary_path(name: str) -> Path | None:

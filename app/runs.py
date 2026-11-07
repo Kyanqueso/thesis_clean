@@ -352,8 +352,8 @@ def sample_rows(pipeline: str, n: int = 1, seed: int | None = None) -> list[dict
 
 # ---------------- file explorer (expected-vs-actual manifest) ----------------
 
-EXPECTED_RESULTS = ["full_evaluation_results.csv", "full_evaluation_results.html",
-                    "evaluation_summary.json", "predictions.npz", "run_meta.json"]
+EXPECTED_RESULTS = ["full_evaluation_results.csv", "mcnemar_within_run.csv",
+                    "predictions.npz", "run_meta.json"]
 
 
 # What /api/file/inspect can actually show. Anything else answers with a size
@@ -451,8 +451,7 @@ def _other_children() -> list[dict]:
     """Everything that is neither dataset nor part of a run tree: the sweep
     aggregate, smoke output, and files left in the repo root by scripts run
     with their default dirs."""
-    out = [_node("Summary", [_tree_entry(paths.summary_rel(n), "expected")
-                             for n in paths.SUMMARY_FILES])]
+    out = []
 
     # smoke runs (--limit) land in their own subtree so they cannot overwrite a
     # delivered run; list whatever is there so the output is still reachable

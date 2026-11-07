@@ -83,7 +83,6 @@ thesis_clean/
 │   ├── organic_bipia_dataset.jsonl
 │   └── organic_injected_dataset.jsonl
 ├── runs/
-│   ├── all_pipelines_summary.csv
 │   ├── pipeline1_alamsabi/
 │   │   ├── normal/
 │   │   │   ├── embeddings/
@@ -137,8 +136,9 @@ the server whenever a `.py` file changes, and that kills the running job.
 
 ## 6. Use the Simulation tab
 
-Pick a pipeline, mode, embedding and classifier, then type a user intent and a
-context to get a malicious/benign verdict.
+Pick an embedding and a classifier, then type a user intent and a context (or upload
+a text file as the context) to get a malicious/benign verdict. The tab uses the
+models trained on `pipeline3_organic_injected/normal`, the headline run.
 
 | Embedding | Works out of the box? | Notes |
 |---|---|---|
@@ -156,9 +156,8 @@ them never needs a GPU or recomputed embeddings.
 `models/` already has all 135 classifiers (9 runs × 3 embeddings × 5 classifiers).
 If you do want to retrain, use the dashboard's **Run** tab:
 
-- **Settings:** keep **save models** ticked, tick **skip projections** (the t-SNE/UMAP
-  charts already exist), and don't tick **force re-embed**, which would recompute the
-  embeddings.
+- **Settings:** don't tick **force re-embed**, which would recompute the embeddings.
+  Trained models are always saved.
 - **Time:** the full sweep takes about **5–8 hours** on a 24-thread laptop.
   `pipeline1_alamsabi/user_intent_only` alone is about 3 hours.
 - **Windows Update:** pause it first (Settings → Windows Update → Pause), or it may
@@ -167,7 +166,8 @@ If you do want to retrain, use the dashboard's **Run** tab:
   Accuracy numbers stay the same (the seed is fixed at 42), but latency and
   training-time numbers become your laptop's. The thesis uses the Drive copy.
 - **Command line:** without the dashboard, run
-  `venv\Scripts\python.exe src\run_all_pipelines.py --save-models --skip-projections`.
+  `venv\Scripts\python.exe src\run_all_pipelines.py`. It embeds whatever is missing with
+  all three models (add `--force` to recompute them), then trains every run.
 
 ## Troubleshooting
 

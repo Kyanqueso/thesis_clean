@@ -1,14 +1,13 @@
-"""The job runner's own logic: marker parsing, what a job is made of, settings.
-
-Run: python -m app.test_jobs   (or under pytest)
-"""
+"""Job runner tests: marker parsing, job commands, settings. Run: python -m app.test_jobs (or pytest)"""
 
 import os
+import sys
 import tempfile
+import time
 from pathlib import Path
 
-from app import jobs, settings, vast
-from app.jobs import VAST_STOP, Job, build_cmds, job_env
+from app import jobs, paths, settings, vast
+from app.jobs import VAST_STOP, Cmd, Job, build_cmds, job_env
 
 
 def test_scan_reads_markers_across_partial_writes():
@@ -31,38 +30,84 @@ def test_scan_reads_markers_across_partial_writes():
         assert (job.step, job.step_label, job.phase) == (2, "B", None)   # a new step clears the phase
 
 
+def _script(cmd) -> str:
+    return Path(cmd.argv[2]).name if len(cmd.argv) > 2 else cmd.argv[0]
+
+
 def test_sweep_shape():
-    local = build_cmds("sweep", {"models": "minilm,qwen3", "force": True})
-    assert len(local) == 1 and local[0].steps == 19 and "--force" in local[0].argv
+    real_data = jobs.data_path
+    try:
+        jobs.data_path = lambda p: Path(__file__)             # every dataset "on disk"
+        local = build_cmds("sweep", {"models": "minilm,qwen3", "force": True})
+        # embed then train, run by run, for all 9 runs
+        assert [_script(c) for c in local[:2]] == ["generate_embeddings.py", "train_evaluate_visualize.py"]
+        assert len(local) == 18 and all(c.run for c in local)
+        assert all("--force" in c.argv for c in local if _script(c) == "generate_embeddings.py")
 
-    # a smoke sweep must not write into the real run dirs
-    smoke = build_cmds("sweep", {"models": "minilm", "limit": 50})[0].argv
-    assert Path(smoke[smoke.index("--runs-dir") + 1]).name == "_smoke"
+        remote = build_cmds("sweep", {"models": "minilm,qwen3", "force": True, "qwen3_remote": True})
+        # every embed first, then the instance stops, then every train (which never re-embeds)
+        assert [_script(c) for c in remote].index(VAST_STOP) == 9
+        assert all(_script(c) == "train_evaluate_visualize.py" for c in remote[10:])
 
-    remote = build_cmds("sweep", {"models": "minilm,qwen3", "force": True, "qwen3_remote": True})
-    embed, stop, train = remote
-    assert stop.argv == [VAST_STOP] and stop.steps == 0
-    assert "--embed-only" in embed.argv and "--force" in embed.argv
-    # the instance is gone by now, so the training pass must never re-embed
-    assert "--train-only" in train.argv and "--force" not in train.argv
-    assert sum(c.steps for c in remote) == 19
-
-    # asking for Vast without qwen3 in the run is a plain local sweep
-    assert len(build_cmds("sweep", {"models": "minilm", "qwen3_remote": True})) == 1
-    assert job_env({"models": "minilm", "qwen3_remote": True}) == {}
+        # asking for Vast without qwen3 in the run is a plain local sweep
+        assert VAST_STOP not in [_script(c) for c in build_cmds("sweep", {"models": "minilm", "qwen3_remote": True})]
+        assert job_env({"models": "minilm", "qwen3_remote": True}) == {}
+    finally:
+        jobs.data_path = real_data
 
 
-def test_full_builds_only_missing_datasets(monkeypatch=None):
+def test_smoke_stays_out_of_real_runs():
+    real_runs, real_data = paths.RUNS_DIR, jobs.data_path
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            paths.RUNS_DIR = paths.RUNS_WRITE_DIR = Path(d)
+            data = Path(d) / "data.jsonl"
+            data.write_text("".join(f'{{"i": {i}}}\n' for i in range(100)), encoding="utf-8")
+            jobs.data_path = lambda p: data
+            cmds = build_cmds("sweep", {"models": "minilm", "limit": 10})
+            for c in cmds:
+                run_dir = c.argv[c.argv.index("--run-dir") + 1] if "--run-dir" in c.argv else \
+                    c.argv[c.argv.index("--embed-dir") + 1]
+                assert Path(run_dir).is_relative_to(Path(d) / "_smoke")
+                copy = Path(c.argv[c.argv.index("--data") + 1])
+                assert len(copy.read_text(encoding="utf-8").splitlines()) == 10
+        finally:
+            jobs.data_path = real_data
+            paths.RUNS_DIR = paths.RUNS_WRITE_DIR = real_runs
+
+
+def test_full_builds_only_missing_datasets():
     real = jobs.data_path
     try:
         jobs.data_path = lambda p: Path("/nope") / p          # nothing on disk
-        scripts = [Path(c.argv[2]).name for c in build_cmds("full", {"models": "minilm"})]
-        assert scripts == ["download_dataset.py", "organic_dataset.py", "run_all_pipelines.py"]
+        scripts = [_script(c) for c in build_cmds("full", {"models": "minilm"})]
+        assert scripts[:3] == ["download_dataset.py", "organic_dataset.py", "generate_embeddings.py"]
         jobs.data_path = lambda p: Path(__file__)             # everything on disk
-        assert len(build_cmds("full", {"models": "minilm"})) == 1
-        assert len(build_cmds("full", {"models": "minilm", "rebuild_data": True})) == 3
+        assert len(build_cmds("full", {"models": "minilm"})) == 18
+        rebuilt = build_cmds("full", {"models": "minilm", "rebuild_data": True, "skip_done": True})
+        # new datasets make cached embeddings stale, so a rebuild always re-embeds
+        assert len(rebuilt) == 20 and all("--force" in c.argv for c in rebuilt if _script(c) == "generate_embeddings.py")
     finally:
         jobs.data_path = real
+
+
+def test_failed_step_skips_only_its_own_run():
+    py = sys.executable
+    with tempfile.TemporaryDirectory() as d:
+        job = Job(id="fail-test", stage="run", params={}, logs_root=Path(d), cmds=[
+            Cmd([py, "-c", "raise SystemExit(3)"], "A embed", run="A"),
+            Cmd([py, "-c", "print('A train ran')"], "A train", run="A"),
+            Cmd([py, "-c", "print('B ran')"], "B embed", run="B"),
+        ])
+        jobs.QUEUE.add(job)
+        for _ in range(300):
+            if job.finished:
+                break
+            time.sleep(0.1)
+        log = job.log_path.read_text(encoding="utf-8")
+        assert job.status == "failed" and job.returncode == 3
+        assert "A train ran" not in log and "skipped: an earlier step of A failed" in log
+        assert "B ran" in log and job.step == 3
 
 
 def test_vast_target_parsing():

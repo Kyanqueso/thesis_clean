@@ -11,7 +11,6 @@ from tqdm import tqdm
 
 import progress  # src/progress.py: the marker lines the dashboard's bars read
 
-# Attempt to import required libraries and provide guidance on failure.
 try:
     import torch
     from sentence_transformers import SentenceTransformer
@@ -19,45 +18,30 @@ try:
     from dotenv import load_dotenv
     import tiktoken
 except ImportError as e:
-    # Name the offender. "Required libraries are not installed" on a fresh venv
-    # sends you re-running the whole pip install to find which one of five it is.
+    # name the missing package, so the fix is obvious
     _PIP_NAME = {"sentence_transformers": "sentence-transformers", "dotenv": "python-dotenv"}
     _missing = getattr(e, "name", None) or "one of the required libraries"
-    print(f"❌ Error: '{_missing}' is not installed ({e}).")
+    print(f"Error: '{_missing}' is not installed ({e}).")
     print(f"   Install it with:  pip install {_PIP_NAME.get(_missing, _missing)}")
     print("   Or reinstall all of them:  pip install -r requirements.txt")
     exit(1)
 
 load_dotenv()
 
-# --- Configuration ---
-# Define project structure paths relative to the script location.
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
-DATA_DIR = ROOT_DIR / "data"
-DEFAULT_EMBED_DIR = ROOT_DIR / "embeddings"
+# joins context and intent in normal mode; app/detect.py must use the same one
+SEPARATOR = "\n\n---\n\n"
 
-# --- OpenAI Client Initialization ---
-# Initialize OpenAI client if the API key is available.
 try:
     client = OpenAI() # Reads OPENAI_API_KEY from environment variables automatically
     OPENAI_ENABLED = True
 except Exception:
     client = None
     OPENAI_ENABLED = False
-    print("⚠️ Warning: OpenAI API key not found or invalid. OpenAI models will be skipped.")
+    print("Warning: OpenAI API key not found or invalid. OpenAI models will be skipped.")
 
-# --- OpenAI Rate Limiting ---
-# text-embedding-3-small is capped on TOKENS PER MINUTE, not requests. The cap is
-# a rolling 60-second window, so it frees up continuously — a 429 means "you are
-# a few thousand tokens over right now", not "you are locked out". Two defences:
-#
-#   1. _TokenBudget paces requests to stay under a fraction of the limit, so the
-#      429 does not happen in the first place;
-#   2. _embed_batch retries with backoff, honouring the retry-after header, so a
-#      429 that slips through costs a second instead of the whole run.
-#
-# Set OPENAI_TPM to your account's real limit (see platform.openai.com/account/rate-limits).
+# OpenAI is limited by tokens per minute; set OPENAI_TPM to your account's real limit
 OPENAI_TPM = int(os.environ.get("OPENAI_TPM", 1_000_000))
 OPENAI_TPM_TARGET = float(os.environ.get("OPENAI_TPM_TARGET", 0.85))  # headroom
 OPENAI_REQUEST_TOKENS = 100_000   # tokens per request; well under the 300k cap
@@ -125,72 +109,42 @@ def _embed_batch(batch: list[str], model_id: str, attempts: int = 6):
             if k == attempts - 1:
                 raise
             wait = _retry_after(e) or min(2 ** k, 30)
-            print(f"\n  ⏳ {type(e).__name__} — retry {k + 1}/{attempts - 1} in {wait:.1f}s")
+            print(f"\n  {type(e).__name__} — retry {k + 1}/{attempts - 1} in {wait:.1f}s")
             time.sleep(wait)
 
 
-# --- Embedding Functions ---
 def get_tokenizer(model_id: str) -> tiktoken.Encoding:
     """Get the tokenizer for a given OpenAI model, with a fallback."""
     try:
         return tiktoken.encoding_for_model(model_id)
     except KeyError:
-        print(f"⚠️ Warning: Tokenizer for '{model_id}' not found. Using 'cl100k_base'.")
+        print(f"Warning: Tokenizer for '{model_id}' not found. Using 'cl100k_base'.")
         return tiktoken.get_encoding("cl100k_base")
-
-def _report_sbert_batches(item: str) -> None:
-    """Make SentenceTransformer.encode() report its batch loop as progress.
-
-    encode() has no callback, and chunking the texts ourselves would change the
-    batch composition (so the padding, so the float16 results). Wrapping the
-    trange it iterates leaves the computation untouched. The module moved
-    between releases; when none matches, the run simply has no inner bar.
-    """
-    import importlib
-    for name in ("sentence_transformers.sentence_transformer.model",
-                 "sentence_transformers.SentenceTransformer"):
-        try:
-            mod = importlib.import_module(name)
-        except ImportError:
-            continue
-        orig = getattr(mod, "trange", None)
-        if orig is None:
-            continue
-
-        def trange(*args, **kwargs):
-            bar = orig(*args, **kwargs)
-            if kwargs.get("desc") != "Batches":
-                return bar
-            return progress.track(bar, "embed", item, total=len(bar))
-
-        mod.trange = trange
-        return
 
 
 def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_type: str, dtype: str = None, max_seq_length: int = None, item: str = "") -> np.ndarray:
 
     if embed_type == 'sbert':
         progress.mark("load", item)
-        _report_sbert_batches(item)
         model_kwargs = {"torch_dtype": getattr(torch, dtype)} if dtype else None
         model = SentenceTransformer(model_id, model_kwargs=model_kwargs)
         if max_seq_length:
             model.max_seq_length = max_seq_length
+        progress.mark("embed", item)   # no total: the dashboard shows it as "working"
         return model.encode(
             texts,
             batch_size=batch_size,
             show_progress_bar=True,
             normalize_embeddings=False
         )
-    
+
     if embed_type == 'openai':
         if not OPENAI_ENABLED:
             raise RuntimeError("OpenAI API key is not configured. Cannot generate embeddings.")
-        
+
         tokenizer = get_tokenizer(model_id)
 
-        # Tokenize once: we need the counts to pace against the TPM limit anyway,
-        # and truncating up front means no request can exceed the model's window.
+        # tokenize once: the counts drive the pacing, and truncation keeps every input under the limit
         prepared, counts, n_truncated = [], [], 0
         for t in progress.track(tqdm(texts, desc="Tokenizing", leave=False),
                                 "tokenize", item, total=len(texts)):
@@ -224,14 +178,10 @@ def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_
 
     raise ValueError(f"Unsupported embedding type: {embed_type}")
 
-# --- Model Definitions ---
 MODELS = {
     "openai": {
         "model_id": "text-embedding-3-small",
-        # texts per request; the real limiter is OPENAI_REQUEST_TOKENS, this is
-        # just a ceiling. Smaller than the old 500 so pacing is fine-grained and
-        # a retry re-sends less work.
-        "batch_size": 256,
+        "batch_size": 256,  # texts per request; OPENAI_REQUEST_TOKENS is the real limit
         "embed_type": "openai",
         "enabled": OPENAI_ENABLED,
         "description": "OpenAI text-embedding-3-small (1536 dims)"
@@ -254,9 +204,7 @@ MODELS = {
     }
 }
 
-# --- Main Execution ---
 def main():
-    """Main function to orchestrate the embedding generation process."""
     parser = argparse.ArgumentParser(
         description="Generate text embeddings using various models.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -264,19 +212,13 @@ def main():
     parser.add_argument(
         "--data",
         type=Path,
-        default=DATA_DIR / "final_training_dataset.jsonl",
+        required=True,
         help="Path to the input dataset (.jsonl file)."
     )
     parser.add_argument(
         "--force",
         action="store_true",
         help="Force regeneration of embeddings, overwriting existing files."
-    )
-    parser.add_argument(
-        "--separator",
-        type=str,
-        default="\n\n---\n\n",
-        help="Separator to join context and user intent."
     )
     parser.add_argument(
         "--mode",
@@ -287,8 +229,8 @@ def main():
     parser.add_argument(
         "--embed-dir",
         type=Path,
-        default=DEFAULT_EMBED_DIR,
-        help="Directory to write generated embeddings to."
+        required=True,
+        help="Directory to write generated embeddings to (a run's embeddings/ folder)."
     )
     parser.add_argument(
         "--models",
@@ -301,57 +243,43 @@ def main():
     EMBED_DIR = args.embed_dir
     EMBED_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Which backends the CALLER asked for. Distinct from MODELS[k]["enabled"],
-    # which also goes False when a backend self-disables (e.g. no OpenAI key) —
-    # that is precisely the case we must report rather than quietly skip.
+    # what the caller asked for; "enabled" can also go False on its own (e.g. no OpenAI key)
     requested = sorted(MODELS.keys())
     if args.models:
         selected = {m.strip() for m in args.models.split(",")}
         unknown = selected - set(MODELS.keys())
         if unknown:
-            print(f"❌ Error: Unknown model(s) in --models: {', '.join(unknown)}. Available: {', '.join(MODELS.keys())}")
+            print(f"Error: Unknown model(s) in --models: {', '.join(unknown)}. Available: {', '.join(MODELS.keys())}")
             return 1
         requested = sorted(selected)
         for key in MODELS:
             if key not in selected:
                 MODELS[key]["enabled"] = False
 
-    # --- Orchestration: run each model in its own isolated subprocess ---
-    # A CUDA OOM can leave a process's CUDA context permanently broken (not just
-    # fragmented), so running every model in-process risks one crash cascading
-    # into the next model even with cache clearing. Each model gets a fresh
-    # interpreter/CUDA context instead; --_single marks the actual worker call.
+    # each model runs in its own subprocess, so a CUDA crash cannot break the next one
     if args._single is None:
-        print("\n🚀 Starting embedding generation (each model runs in its own subprocess)...")
+        print("\nStarting embedding generation (each model runs in its own subprocess)...")
         for key, config in MODELS.items():
             if not config["enabled"]:
-                print(f"\n🟡 Skipping '{key}' model (disabled).")
+                print(f"\nSkipping '{key}' model (disabled).")
                 continue
 
             output_path = EMBED_DIR / f"{key}_prompt.npy"
             if output_path.exists() and not args.force:
-                print(f"\n--- ⏳ {key.upper()}: embeddings already exist. Use --force to overwrite. ---")
+                print(f"\n--- {key.upper()}: embeddings already exist. Use --force to overwrite. ---")
                 continue
 
-            print(f"\n--- ⏳ Launching subprocess for: {key.upper()} ---")
+            print(f"\n--- Launching subprocess for: {key.upper()} ---")
             cmd = [
                 sys.executable, str(Path(__file__).resolve()),
                 "--data", str(args.data),
                 "--mode", args.mode,
                 "--embed-dir", str(EMBED_DIR),
-                "--separator", args.separator,
-                "--models", key,
                 "--_single", key,
             ]
             cwd = None
-            # qwen3 needs a GPU; the dashboard sets this to embed on the Vast.ai
-            # instance from Settings instead (app/vast.py uploads the data, runs
-            # this same script there and downloads the .npy). Cache, --force
-            # and the failure summary below all stay in this one loop.
+            # qwen3 can run on the Vast.ai instance from Settings instead (see app/vast.py)
             if key == "qwen3" and os.environ.get("THESIS_QWEN3_REMOTE", "") not in ("", "0"):
-                if args.separator != parser.get_default("separator"):
-                    print("❌ Error: a custom --separator is not supported for remote qwen3.")
-                    return 1
                 print("    (running on the Vast.ai instance)")
                 cmd = [
                     sys.executable, "-u", "-m", "app.vast", "embed",
@@ -364,49 +292,44 @@ def main():
                 cmd.append("--force")
             result = subprocess.run(cmd, cwd=cwd)
             if result.returncode != 0:
-                print(f"  ❌ Subprocess for '{key}' exited with code {result.returncode}.")
+                print(f"  Subprocess for '{key}' exited with code {result.returncode}.")
 
-        print("\n📁 Summary of embedding files:")
+        print("\nSummary of embedding files:")
         produced, absent = [], []
         for key in requested:
             output_path = EMBED_DIR / f"{key}_prompt.npy"
             if output_path.exists():
                 size_mb = output_path.stat().st_size / 1e6
-                print(f"   ✔️  {output_path.name:<25} ({size_mb:.2f} MB)")
+                print(f"   {output_path.name:<25} ({size_mb:.2f} MB)")
                 produced.append(key)
             else:
                 why = "" if MODELS[key]["enabled"] else "  <- model disabled (missing API key?)"
-                print(f"   ❌ {output_path.name:<25} (not generated){why}")
+                print(f"   {output_path.name:<25} (not generated){why}")
                 absent.append(key)
 
-        # Exit non-zero when a REQUESTED backend produced nothing. Skipping
-        # openai because OPENAI_API_KEY was never exported used to print a
-        # warning and exit 0, so the orchestrator recorded the step as a success
-        # and moved on — the missing runs only surfaced much later, in the
-        # results table. Failing here puts it in the sweep's failure summary.
+        # fail when a requested backend produced nothing, so the sweep records it as a failure
         if absent:
-            print(f"\n❌ No embeddings produced for: {', '.join(absent)}")
+            print(f"\nNo embeddings produced for: {', '.join(absent)}")
             print("   If a key is missing: export OPENAI_API_KEY / HF_TOKEN and re-run.")
             print("   If you did not want these backends, pass --models "
                   f"{','.join(produced) or '<backends you want>'}.")
             return 1
 
-        print("\n\n🎉🎉🎉 Embedding generation completed! 🎉🎉🎉")
+        print("\n\nEmbedding generation completed!")
         return 0
 
-    # --- Data Loading and Validation ---
     if not args.data.is_file():
-        print(f"❌ Error: Data file not found at: {args.data}")
+        print(f"Error: Data file not found at: {args.data}")
         return 1
 
-    print(f"🔄 Loading data from: {args.data.name}...")
+    print(f"Loading data from: {args.data.name}...")
     try:
         df = pd.read_json(args.data, lines=True)
     except ValueError as e:
-        print(f"❌ Error reading JSONL file: {e}")
+        print(f"Error reading JSONL file: {e}")
         return 1
 
-    print("📊 Dataset Statistics:")
+    print("Dataset Statistics:")
     print(f"   - Total samples: {len(df):,}")
     if 'label' in df.columns:
         malicious_count = df['label'].sum()
@@ -414,78 +337,46 @@ def main():
         print(f"   - Malicious: {malicious_count:,} ({malicious_count/total_count:.1%})")
         print(f"   - Benign: {total_count - malicious_count:,} ({(total_count - malicious_count)/total_count:.1%})")
 
-    # --- Text Preparation ---
     if args.mode == "user_intent_only":
-        print("\n🔗 Mode: user_intent_only — embedding user_intent alone")
+        print("\nMode: user_intent_only — embedding user_intent alone")
         combined_texts = df["user_intent"].astype(str).tolist()
     elif args.mode == "context_only":
-        print("\n🔗 Mode: context_only — embedding context alone")
+        print("\nMode: context_only — embedding context alone")
         combined_texts = df["context"].astype(str).tolist()
     else:
-        print(f"\n🔗 Mode: normal — combining context and user intent using separator: '{args.separator.strip()}'")
+        print(f"\nMode: normal — combining context and user intent using separator: '{SEPARATOR.strip()}'")
         combined_texts = [
-            f"{context}{args.separator}{intent}"
+            f"{context}{SEPARATOR}{intent}"
             for context, intent in zip(df["context"].astype(str), df["user_intent"].astype(str))
         ]
 
-    print("📝 Sample combined text (first 200 chars):")
+    print("Sample combined text (first 200 chars):")
     print(f"   '{combined_texts[0][:200]}...'")
 
-    # --- Embedding Generation Loop ---
-    print("\n🚀 Starting embedding generation...")
-    for key, config in MODELS.items():
-        if not config["enabled"]:
-            print(f"\n🟡 Skipping '{key}' model (disabled).")
-            continue
+    # worker: embed the one model the orchestrator launched it for
+    key = args._single
+    config = MODELS[key]
+    print(f"\n--- Processing: {key.upper()} ---")
+    print(f"    Model: {config['description']}")
+    try:
+        embeddings = generate_embeddings(
+            texts=combined_texts,
+            model_id=config["model_id"],
+            batch_size=config["batch_size"],
+            embed_type=config["embed_type"],
+            dtype=config.get("dtype"),
+            max_seq_length=config.get("max_seq_length"),
+            item=key,
+        )
+    except Exception as e:
+        print(f"  Error generating embeddings for '{key}': {e}")
+        return 1
 
-        print(f"\n--- ⏳ Processing: {key.upper()} ---")
-        print(f"    Model: {config['description']}")
-        
-        output_path = EMBED_DIR / f"{key}_prompt.npy"
-
-        if output_path.exists() and not args.force:
-            print(f"  ↪️  Embeddings already exist. Use --force to overwrite.")
-            continue
-
-        try:
-            print("  - Generating embeddings...")
-            embeddings = generate_embeddings(
-                texts=combined_texts,
-                model_id=config["model_id"],
-                batch_size=config["batch_size"],
-                embed_type=config["embed_type"],
-                dtype=config.get("dtype"),
-                max_seq_length=config.get("max_seq_length"),
-                item=key,
-            )
-            
-            np.save(output_path, embeddings)
-            print(f"  ✔️  Saved embeddings to: {output_path.name}")
-            print(f"      Shape: {embeddings.shape}")
-            print(f"      Size: {embeddings.nbytes / 1e6:.2f} MB")
-            
-        except Exception as e:
-            print(f"  ❌ Error generating embeddings for '{key}': {e}")
-        finally:
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except ImportError:
-                pass
-
-    print("\n\n🎉🎉🎉 Embedding generation completed! 🎉🎉🎉")
-    
-    # --- Summary of Generated Files ---
-    print("\n📁 Summary of embedding files:")
-    for key, config in MODELS.items():
-        if config["enabled"]:
-            output_path = EMBED_DIR / f"{key}_prompt.npy"
-            if output_path.exists():
-                size_mb = output_path.stat().st_size / 1e6
-                print(f"   ✔️  {output_path.name:<25} ({size_mb:.2f} MB)")
-            else:
-                print(f"   ❌ {output_path.name:<25} (generation failed or skipped)")
+    output_path = EMBED_DIR / f"{key}_prompt.npy"
+    np.save(output_path, embeddings)
+    print(f"  Saved embeddings to: {output_path.name}")
+    print(f"      Shape: {embeddings.shape}")
+    print(f"      Size: {embeddings.nbytes / 1e6:.2f} MB")
     return 0
 
 

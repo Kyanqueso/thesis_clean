@@ -1,55 +1,22 @@
+"""Run every pipeline x ablation mode: embed (cached embeddings are reused unless --force), then train and evaluate."""
+
 import argparse
 import subprocess
 import sys
 from pathlib import Path
-
-import pandas as pd
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-# machines name their trees differently (data/ + runs/ here, *_from_vastai/ on
-# the main machine); pipeline_paths resolves them, and the dashboard passes
-# --data-dir/--runs-dir explicitly when it launches this script
-from pipeline_paths import DATA_DIR, DATASETS as PIPELINES, MODES, RUNS_DIR  # noqa: E402
+from pipeline_paths import DATA_DIR, DATASETS, MODES, RUNS_DIR  # noqa: E402
 
 import progress  # src/progress.py: the marker lines the dashboard's bars read
 
-ALL_MODELS = ("openai", "qwen3", "minilm")
-
-
-def already_trained(results_dir: Path, models: str | None) -> bool:
-    """True when this run's results table already covers every requested
-    embedding. Checked per embedding, not just "a CSV exists": a run trained on
-    minilm alone is not done once qwen3 embeddings arrive."""
-    csv_path = results_dir / "full_evaluation_results.csv"
-    if not csv_path.is_file():
-        return False
-    wanted = {m.strip().upper() for m in (models.split(",") if models else ALL_MODELS)}
-    try:
-        have = set(pd.read_csv(csv_path, usecols=["Embeddings"])["Embeddings"].astype(str))
-    except (ValueError, OSError):
-        return False
-    return wanted <= have
-
-
-def make_limited_copy(src: Path, limit: int, dest: Path) -> Path:
-    """Write the first `limit` rows of src to dest (for smoke testing)."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(src, "r", encoding="utf-8") as fin, open(dest, "w", encoding="utf-8") as fout:
-        for i, line in enumerate(fin):
-            if i >= limit:
-                break
-            fout.write(line)
-    return dest
-
 
 def describe_exit(code: int) -> str:
-    """Human-readable exit status. A negative code means killed by a signal, and
-    saying so matters: 'exit -11' reads like an ordinary failure when it is
-    actually a native crash (SIGSEGV) inside a C extension."""
+    """Human-readable exit status; a negative code means the child was killed by a signal."""
     if code >= 0:
         return f"exit {code}"
     import signal
@@ -62,179 +29,60 @@ def describe_exit(code: int) -> str:
 
 
 def run_step(cmd: list[str], label: str) -> bool:
-    """Run one stage. Returns True on success; never raises on a child failure.
-
-    A failed step is reported and skipped rather than aborting the sweep. One
-    run crashing used to discard every run after it — a SIGSEGV in pipeline2
-    threw away pipeline2's remaining modes and all of pipeline3, including work
-    that had nothing to do with the fault. Failures are collected and summarised
-    at the end, and the process still exits non-zero, so nothing is hidden.
-    """
-    # Children run with -u and these prints flush: a process killed by a native
-    # signal discards its buffered stdout, so without this the log stops well
-    # before the line that actually crashed and the exit code points nowhere.
+    """Run one stage; a failure is reported and skipped instead of aborting the sweep."""
+    # flush before the child runs: a native crash would otherwise lose the buffered log lines
     progress.step(label)
     print(f"\n{'='*70}\n>>> {label}\n{'='*70}", flush=True)
     print("   $", " ".join(str(c) for c in cmd), flush=True)
     result = subprocess.run(cmd)
     if result.returncode != 0:
-        print(f"\n  ❌ FAILED ({describe_exit(result.returncode)}): {label}", flush=True)
-        print("     continuing with the remaining runs; use --fail-fast to stop here instead.",
-              flush=True)
+        print(f"\n  FAILED ({describe_exit(result.returncode)}): {label}", flush=True)
+        print("     continuing with the remaining runs.", flush=True)
         return False
     return True
 
 
-def aggregate_results(runs_dir: Path):
-    frames = []
-    for pipeline_key in PIPELINES:
-        for mode in MODES:
-            csv_path = runs_dir / pipeline_key / mode / "results" / "full_evaluation_results.csv"
-            if not csv_path.is_file():
-                print(f"  ⚠️ Missing results for {pipeline_key}/{mode}, skipping in aggregate.")
-                continue
-            df = pd.read_csv(csv_path)
-            df.insert(0, "Pipeline", pipeline_key)
-            df.insert(1, "Mode", mode)
-            frames.append(df)
-
-    if not frames:
-        print("  ❌ No run results found to aggregate.")
-        return
-
-    summary = pd.concat(frames, ignore_index=True).sort_values(by="ROC-AUC", ascending=False).reset_index(drop=True)
-    summary.to_csv(runs_dir / "all_pipelines_summary.csv", index=False)
-
-    # --- HTML Report Export ---
-    # Aggregated table of results across all 9 pipeline x ablation-mode runs.
-    html_table = summary.to_html(index=False, float_format=lambda x: f"{x:.4f}")
-    html_doc = (
-        "<!-- Generated by src/run_all_pipelines.py -->\n"
-        "<html><head><meta charset=\"utf-8\"><title>All Pipelines Summary</title>"
-        "<style>body{font-family:sans-serif;margin:2rem;}"
-        "table{border-collapse:collapse;width:100%;}"
-        "th,td{border:1px solid #ccc;padding:6px 10px;text-align:right;}"
-        "th{background:#f2f2f2;text-align:center;}</style></head>"
-        f"<body><h2>All Pipelines Summary</h2>{html_table}</body></html>\n"
-    )
-    (runs_dir / "all_pipelines_summary.html").write_text(html_doc, encoding="utf-8")
-
-    print(f"  ✔️ Master summary written to: {runs_dir / 'all_pipelines_summary.csv'}")
-    print(f"  ✔️ Master summary written to: {runs_dir / 'all_pipelines_summary.html'}")
-
-
 def main():
-    parser = argparse.ArgumentParser(
-        description="Run all 3 pipelines x 3 ablation modes and aggregate results.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument("--limit", type=int, default=None,
-                         help="Truncate each dataset to this many rows first (for smoke testing).")
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--force", action="store_true",
-                         help="Force regeneration of embeddings even if cached.")
-    parser.add_argument("--models", type=str, default=None,
-                         help="Comma-separated subset of embedding models to run (passed through to generate_embeddings.py).")
-    parser.add_argument("--python", type=str, default=sys.executable,
-                         help="Python interpreter to use for subprocess calls.")
-    parser.add_argument("--save-models", action="store_true",
-                         help="Persist trained classifiers per run (passed through to train_evaluate_visualize.py).")
-    parser.add_argument("--fail-fast", action="store_true",
-                         help="Stop at the first failing step instead of continuing with the rest.")
-    parser.add_argument("--skip-projections", action="store_true",
-                         help="Skip PCA/t-SNE/UMAP plots (passed through to train_evaluate_visualize.py).")
-    parser.add_argument("--embed-only", action="store_true",
-                         help="Only generate embeddings; no training, no aggregate.")
-    parser.add_argument("--train-only", action="store_true",
-                         help="Only train on embeddings already on disk.")
-    parser.add_argument("--skip-done", action="store_true",
-                         help="Skip a run whose results already cover every requested embedding "
-                              "(ignored with --force).")
-    parser.add_argument("--data-dir", type=Path, default=DATA_DIR,
-                         help="Directory holding the pipeline .jsonl datasets.")
-    parser.add_argument("--runs-dir", type=Path, default=RUNS_DIR,
-                         help="Directory the per-run outputs are written into.")
+                        help="Recompute embeddings even if they are already on disk.")
     args = parser.parse_args()
 
-    data_dir, runs_dir = args.data_dir, args.runs_dir
-    print(f"  datasets: {data_dir}")
-    print(f"  runs:     {runs_dir}")
+    print(f"  datasets: {DATA_DIR}")
+    print(f"  runs:     {RUNS_DIR}")
 
     failures: list[str] = []
-    for pipeline_key, data_name in PIPELINES.items():
-        data_path = data_dir / data_name
+    for pipeline, data_name in DATASETS.items():
+        data_path = DATA_DIR / data_name
         if not data_path.is_file():
-            print(f"⚠️ Skipping {pipeline_key}: dataset not found at {data_path}")
+            print(f"Skipping {pipeline}: dataset not found at {data_path}")
             continue
 
-        run_data_path = data_path
-        if args.limit:
-            run_data_path = make_limited_copy(data_path, args.limit, runs_dir / "_smoke_data" / f"{pipeline_key}.jsonl")
-
         for mode in MODES:
-            run_dir = runs_dir / pipeline_key / mode
-            embed_dir = run_dir / "embeddings"
-            results_dir = run_dir / "results"
-            figures_dir = run_dir / "figures"
-
-            if args.skip_done and not args.force and already_trained(results_dir, args.models):
-                # still announce the steps, so the dashboard's step count adds up
-                for stage in ([] if args.train_only else ["generate_embeddings"]) + \
-                             ([] if args.embed_only else ["train_evaluate_visualize"]):
-                    progress.step(f"{pipeline_key} / {mode} — {stage} (already done)")
-                print(f"  ↪️  {pipeline_key}/{mode}: results already exist, skipping (--skip-done).",
-                      flush=True)
-                continue
-
-            gen_cmd = [
-                args.python, "-u", str(SCRIPT_DIR / "generate_embeddings.py"),
-                "--data", str(run_data_path),
-                "--mode", mode,
-                "--embed-dir", str(embed_dir),
-            ]
+            run_dir = RUNS_DIR / pipeline / mode
+            gen_cmd = [sys.executable, "-u", str(SCRIPT_DIR / "generate_embeddings.py"),
+                       "--data", str(data_path), "--mode", mode,
+                       "--embed-dir", str(run_dir / "embeddings")]
             if args.force:
                 gen_cmd.append("--force")
-            if args.models:
-                gen_cmd += ["--models", args.models]
-            if args.train_only:
-                pass
-            elif not run_step(gen_cmd, f"{pipeline_key} / {mode} — generate_embeddings"):
-                failures.append(f"{pipeline_key}/{mode} — generate_embeddings")
-                if args.fail_fast:
-                    raise RuntimeError(f"generate_embeddings failed for {pipeline_key}/{mode}")
+            if not run_step(gen_cmd, f"{pipeline} / {mode} — generate_embeddings"):
+                failures.append(f"{pipeline}/{mode} — generate_embeddings")
                 continue   # no embeddings -> nothing to train on
-            if args.embed_only:
-                continue
 
-            eval_cmd = [
-                args.python, "-u", str(SCRIPT_DIR / "train_evaluate_visualize.py"),
-                "--data", str(run_data_path),
-                "--embed-dir", str(embed_dir),
-                "--results-dir", str(results_dir),
-                "--figures-dir", str(figures_dir),
-            ]
-            if args.save_models:
-                eval_cmd += ["--save-models", "--models-dir", str(run_dir / "models")]
-            if args.skip_projections:
-                eval_cmd.append("--skip-projections")
-            if not run_step(eval_cmd, f"{pipeline_key} / {mode} — train_evaluate_visualize"):
-                failures.append(f"{pipeline_key}/{mode} — train_evaluate_visualize")
-                if args.fail_fast:
-                    raise RuntimeError(f"train_evaluate_visualize failed for {pipeline_key}/{mode}")
-
-    if not args.embed_only:
-        progress.step("Aggregating results across all runs")
-        print(f"\n{'='*70}\n>>> Aggregating results across all runs\n{'='*70}")
-        aggregate_results(runs_dir)
+            eval_cmd = [sys.executable, "-u", str(SCRIPT_DIR / "train_evaluate_visualize.py"),
+                        "--data", str(data_path), "--run-dir", str(run_dir)]
+            if not run_step(eval_cmd, f"{pipeline} / {mode} — train_evaluate_visualize"):
+                failures.append(f"{pipeline}/{mode} — train_evaluate_visualize")
 
     if failures:
-        print(f"\n{'='*70}\n⚠️  {len(failures)} step(s) FAILED — everything else completed:")
+        print(f"\n{'='*70}\n{len(failures)} step(s) FAILED — everything else completed:")
         for f in failures:
             print(f"     · {f}")
-        print("   Re-run to retry only these: finished embeddings are cached, so the\n"
-              "   successful runs are skipped cheaply.\n" + "=" * 70)
+        print("   Re-run to retry: finished embeddings are cached, so only the\n"
+              "   missing ones are recomputed.\n" + "=" * 70)
         return 1
 
-    print("\n🎉🎉🎉 All pipelines completed! 🎉🎉🎉")
+    print("\nAll pipelines completed!")
     return 0
 
 

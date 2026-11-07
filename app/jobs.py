@@ -14,24 +14,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app import paths, settings, vast
-from app.paths import write_run_dir
-from app.runs import MODES, PIPELINES, ROOT, data_path
+from app.paths import ROOT, write_run_dir
+from app.runs import EMB_MODELS, MODES, PIPELINES, data_path
 from pipeline_paths import SMOKE_SUBDIR
 
 SRC_DIR = ROOT / "src"
+LOG_DIR = paths.RUNS_DIR / "_logs"
+ALL_RUNS = [(p, m) for p in PIPELINES for m in MODES]
 
-# one of these in a job's command list is not a process: the worker stops the
-# Vast.ai instance there, once the last step that needs the GPU is behind it
+# a pseudo-command: the worker stops the Vast.ai instance here, once no later step needs the GPU
 VAST_STOP = "@vast-stop"
 
-# the lines src/progress.py prints
+# the marker lines src/progress.py prints
 MARKER = re.compile(r"##(step|progress) (\{.*\})")
-
-
-def log_dir() -> Path:
-    """Current write tree's log folder. A function, not a constant: app.paths
-    re-resolves the tree while the server runs."""
-    return paths.RUNS_WRITE_DIR / "_logs"
 
 
 class ValidationError(Exception):
@@ -41,10 +36,8 @@ class ValidationError(Exception):
 @dataclass
 class Cmd:
     argv: list[str]
-    # announced by the worker as one step of the overall bar. Empty for
-    # run_all_pipelines.py, which announces its own (`steps` of them).
-    label: str = ""
-    steps: int = 1
+    label: str = ""   # this command's step on the overall bar
+    run: str = ""     # "pipeline / mode" it belongs to; a failure skips the rest of that run, not the job
 
 
 @dataclass
@@ -60,9 +53,7 @@ class Job:
     finished: float | None = None
     returncode: int | None = None
     cancel_requested: bool = False
-    # pinned when the job is created, so a tree that moves mid-session cannot
-    # strand a running job's log somewhere the reader no longer looks
-    logs_root: Path = field(default_factory=log_dir)
+    logs_root: Path = LOG_DIR
     # progress, scraped from the ##step / ##progress lines in the log
     step: int = 0                 # steps STARTED so far
     step_label: str = ""
@@ -81,8 +72,7 @@ class Job:
         return bool(self.env.get("THESIS_QWEN3_REMOTE"))
 
     def scan(self) -> None:
-        """Read whatever the log gained since the last call and fold its marker
-        lines (src/progress.py) into step / phase."""
+        """Fold the marker lines the log gained since the last call into step / phase."""
         with self._scan_lock:
             try:
                 with open(self.log_path, "rb") as f:
@@ -93,12 +83,11 @@ class Job:
             if not chunk:
                 return
             self._off += len(chunk)
-            # tqdm redraws with \r, so a marker can follow one on the same "line"
+            # tqdm redraws with \r, so split on both; the last partial line waits for the next scan
             lines = re.split(r"[\r\n]", self._tail + chunk.decode("utf-8", "replace"))
             self._tail = lines.pop()
             for line in lines:
-                # searched, not anchored: tqdm draws to stderr without a newline,
-                # so a marker often lands on the end of a progress-bar line
+                # searched, not anchored: a marker often lands on the end of a tqdm bar
                 m = MARKER.search(line)
                 if not m:
                     continue
@@ -123,19 +112,9 @@ class Job:
             "started": self.started, "finished": self.finished,
             "returncode": self.returncode,
             "cmds": [" ".join(c.argv) for c in self.cmds],
-            "progress": {"step": self.step, "steps": sum(c.steps for c in self.cmds),
+            "progress": {"step": self.step, "steps": sum(c.argv != [VAST_STOP] for c in self.cmds),
                          "label": self.step_label, "phase": self.phase},
         }
-
-
-def _limited_copy(src: Path, limit: int, dest: Path) -> Path:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(src, "r", encoding="utf-8") as fin, open(dest, "w", encoding="utf-8") as fout:
-        for i, line in enumerate(fin):
-            if i >= limit:
-                break
-            fout.write(line)
-    return dest
 
 
 def _wants_remote(params: dict) -> bool:
@@ -154,108 +133,104 @@ def job_env(params: dict) -> dict:
     return {"THESIS_QWEN3_REMOTE": "1"}
 
 
+def _limited_copy(src: Path, limit: int, dest: Path) -> Path:
+    """Write the first `limit` rows of src to dest (for smoke testing)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(src, "r", encoding="utf-8") as fin, open(dest, "w", encoding="utf-8") as fout:
+        for i, line in enumerate(fin):
+            if i >= limit:
+                break
+            fout.write(line)
+    return dest
+
+
+def _already_trained(results_dir: Path, models: str | None) -> bool:
+    """True when this run's results table already covers every requested embedding."""
+    import pandas as pd
+    csv_path = results_dir / "full_evaluation_results.csv"
+    if not csv_path.is_file():
+        return False
+    wanted = {m.strip().upper() for m in (models.split(",") if models else EMB_MODELS)}
+    try:
+        have = set(pd.read_csv(csv_path, usecols=["Embeddings"])["Embeddings"].astype(str))
+    except (ValueError, OSError):
+        return False
+    return wanted <= have
+
+
 def _dataset_cmds(py: str, which: str) -> list[Cmd]:
     if which == "alamsabi":
-        return [Cmd([py, "-u", str(SRC_DIR / "download_dataset.py"), "--out-dir", str(paths.DATA_DIR)],
-                    "Download the Alamsabi dataset")]
-    if which == "organic":
-        return [Cmd([py, "-u", str(SRC_DIR / "organic_dataset.py"), "--out-dir", str(paths.DATA_DIR)],
-                    "Build the organic datasets (collect, clean, de-identify)")]
-    raise ValidationError("dataset job needs which=alamsabi|organic")
+        return [Cmd([py, "-u", str(SRC_DIR / "download_dataset.py")], "Download the Alamsabi dataset")]
+    return [Cmd([py, "-u", str(SRC_DIR / "organic_dataset.py")],
+                "Build the organic datasets (collect, clean, de-identify)")]
 
 
-def _sweep_cmds(py: str, params: dict) -> list[Cmd]:
-    n_runs = len(PIPELINES) * len(MODES)
-    # a --limit sweep is a smoke test: keep it out of the real run dirs so it
-    # cannot overwrite delivered results with a toy evaluation
-    runs_dir = paths.RUNS_WRITE_DIR / SMOKE_SUBDIR if params.get("limit") else paths.RUNS_WRITE_DIR
-    base = [py, "-u", str(SRC_DIR / "run_all_pipelines.py"),
-            "--data-dir", str(paths.DATA_DIR), "--runs-dir", str(runs_dir)]
-    if params.get("limit"):
-        base += ["--limit", str(int(params["limit"]))]
+def _run_cmds(py: str, params: dict, runs: list[tuple[str, str]], data_later: bool = False) -> list[Cmd]:
+    """Embed + train commands per (pipeline, mode); data_later = the job builds the datasets first."""
+    limit = None if data_later else params.get("limit")
+    embed_extra = ["--force"] if params.get("force") else []
     if params.get("models"):
-        base += ["--models", str(params["models"])]
-    if params.get("skip_done"):
-        base.append("--skip-done")
-    force = ["--force"] if params.get("force") else []
-    train = []
-    if params.get("save_models", True):
-        train.append("--save-models")
-    if params.get("skip_projections"):
-        train.append("--skip-projections")
-
-    if not _wants_remote(params):
-        return [Cmd(base + force + train, steps=2 * n_runs + 1)]
-    # With a rented GPU in play, do every embedding first and hand the instance
-    # back before the hours of CPU-only training start.
-    return [Cmd(base + force + ["--embed-only"], steps=n_runs),
-            Cmd([VAST_STOP], steps=0),
-            Cmd(base + train + ["--train-only"], steps=n_runs + 1)]
+        embed_extra += ["--models", str(params["models"])]
+    copies: dict[str, Path] = {}
+    embeds, trains = [], []
+    for pipeline, mode in runs:
+        data = data_path(pipeline)
+        if not data_later and not data.is_file():
+            raise ValidationError(f"dataset missing: {data.name} - build/download it first")
+        if limit:  # a smoke test: a row-limited copy, written under runs/_smoke so real results are safe
+            if pipeline not in copies:
+                copies[pipeline] = _limited_copy(
+                    data, int(limit), paths.RUNS_DIR / SMOKE_SUBDIR / "_smoke_data" / f"{pipeline}.jsonl")
+            data = copies[pipeline]
+        d = write_run_dir(pipeline, mode, smoke=bool(limit))
+        if params.get("skip_done") and not params.get("force") and _already_trained(d / "results", params.get("models")):
+            continue
+        name = f"{pipeline} / {mode}"
+        embeds.append(Cmd([py, "-u", str(SRC_DIR / "generate_embeddings.py"), "--data", str(data),
+                           "--mode", mode, "--embed-dir", str(d / "embeddings"), *embed_extra],
+                          f"{name} — generate_embeddings", run=name))
+        trains.append(Cmd([py, "-u", str(SRC_DIR / "train_evaluate_visualize.py"),
+                           "--data", str(data), "--run-dir", str(d)],
+                          f"{name} — train_evaluate_visualize", run=name))
+    if _wants_remote(params):
+        # with a rented GPU, embed everything first and stop the instance before the CPU-only training
+        return embeds + [Cmd([VAST_STOP])] + trains
+    return [c for pair in zip(embeds, trains) for c in pair]
 
 
 def build_cmds(stage: str, params: dict) -> list[Cmd]:
     py = sys.executable
 
-    if stage == "dataset":
-        return _dataset_cmds(py, params.get("which"))
-
     if stage == "sweep":
-        return _sweep_cmds(py, params)
+        cmds = _run_cmds(py, params, ALL_RUNS)
 
-    if stage == "full":
-        # data -> embeddings -> training -> aggregate. Datasets already on disk
-        # are kept unless asked otherwise: the existing results were trained on
-        # exactly those files.
+    elif stage == "full":
         rebuild = bool(params.get("rebuild_data"))
         cmds = []
         if rebuild or not data_path("pipeline1_alamsabi").is_file():
             cmds += _dataset_cmds(py, "alamsabi")
         if rebuild or not all(data_path(p).is_file() for p in PIPELINES if p != "pipeline1_alamsabi"):
             cmds += _dataset_cmds(py, "organic")
-        return cmds + _sweep_cmds(py, params)
+        if rebuild:
+            # new datasets make every cached embedding and result stale
+            params = {**params, "force": True, "skip_done": False}
+        cmds += _run_cmds(py, params, ALL_RUNS, data_later=bool(cmds))
 
-    if stage == "run":
+    elif stage == "run":
         pipeline, mode = params.get("pipeline"), params.get("mode")
         if pipeline not in PIPELINES:
             raise ValidationError(f"unknown pipeline: {pipeline}")
         if mode not in MODES:
             raise ValidationError(f"unknown mode: {mode}")
-        src = data_path(pipeline)
-        if not src.is_file():
-            raise ValidationError(f"dataset missing: {src.name} - build/download it first")
+        cmds = _run_cmds(py, params, [(pipeline, mode)])
 
-        # a --limit run is a smoke test: keep it out of the real run dir so it
-        # cannot overwrite delivered results with a toy evaluation
-        smoke = bool(params.get("limit"))
-        run_data = src
-        if smoke:
-            run_data = _limited_copy(src, int(params["limit"]),
-                                     paths.RUNS_WRITE_DIR / "_smoke_data" / f"{pipeline}.jsonl")
+    else:
+        raise ValidationError(f"unknown stage: {stage}")
 
-        d = write_run_dir(pipeline, mode, smoke=smoke)
-        gen_cmd = [py, "-u", str(SRC_DIR / "generate_embeddings.py"),
-                   "--data", str(run_data), "--mode", mode,
-                   "--embed-dir", str(d / "embeddings")]
-        if params.get("force"):
-            gen_cmd.append("--force")
-        if params.get("models"):
-            gen_cmd += ["--models", str(params["models"])]
-
-        eval_cmd = [py, "-u", str(SRC_DIR / "train_evaluate_visualize.py"),
-                    "--data", str(run_data),
-                    "--embed-dir", str(d / "embeddings"),
-                    "--results-dir", str(d / "results"),
-                    "--figures-dir", str(d / "figures")]
-        if params.get("save_models", True):
-            eval_cmd += ["--save-models", "--models-dir", str(d / "models")]
-        if params.get("skip_projections"):
-            eval_cmd.append("--skip-projections")
-        name = f"{pipeline} / {mode}"
-        stop = [Cmd([VAST_STOP], steps=0)] if _wants_remote(params) else []
-        return [Cmd(gen_cmd, f"{name} — generate_embeddings"), *stop,
-                Cmd(eval_cmd, f"{name} — train_evaluate_visualize")]
-
-    raise ValidationError(f"unknown stage: {stage}")
+    if not any(c.argv != [VAST_STOP] for c in cmds):
+        raise ValidationError("nothing to run: every picked run already has results "
+                              "(untick “skip finished runs” to redo them)")
+    return cmds
 
 
 class JobQueue:
@@ -271,13 +246,16 @@ class JobQueue:
         cmds = build_cmds(stage, params)
         job = Job(id=uuid.uuid4().hex[:12], stage=stage, params=params, cmds=cmds,
                   env=job_env(params))
+        self.add(job)
+        return job
+
+    def add(self, job: Job) -> None:
         job.log_path.parent.mkdir(parents=True, exist_ok=True)
         job.log_path.write_text("", encoding="utf-8")
         with self._lock:
             self.jobs[job.id] = job
             self.order.append(job.id)
         self._event.set()
-        return job
 
     def list(self) -> list[dict]:
         with self._lock:
@@ -300,7 +278,7 @@ class JobQueue:
             if cur and cur[0] is job:
                 proc = cur[1]
                 if os.name == "nt":
-                    # /T kills the whole tree (run_all_pipelines spawns children)
+                    # /T kills the whole tree (generate_embeddings spawns one process per model)
                     subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                                    capture_output=True)
                 else:
@@ -316,9 +294,7 @@ class JobQueue:
         return None
 
     def _vast_stop(self, job: Job, logf) -> None:
-        """Stop the rented instance, unless something still needs it. Never
-        raises: failing to stop must not turn a finished job into a failed one,
-        but it is said loudly, because it is the user's money."""
+        """Stop the rented instance unless a queued job still needs it; never raises, always logs."""
         if job.vast_stopped:
             return
         job.vast_stopped = True
@@ -336,6 +312,46 @@ class JobQueue:
         logf.write(f"\n[Vast.ai] {msg}\n")
         logf.flush()
 
+    def _run(self, job: Job, logf) -> None:
+        """Run a job's commands; a failed step skips the rest of its run, a failed dataset step ends the job."""
+        failed_runs: list[str] = []
+        for cmd in job.cmds:
+            if job.cancel_requested:
+                break
+            if cmd.argv == [VAST_STOP]:
+                self._vast_stop(job, logf)
+                continue
+            logf.write("##step " + json.dumps({"label": cmd.label}) + "\n")
+            if cmd.run in failed_runs:
+                logf.write(f"skipped: an earlier step of {cmd.run} failed\n")
+                logf.flush()
+                continue
+            logf.write("$ " + " ".join(cmd.argv) + "\n")
+            logf.flush()
+            # the scripts print non-ASCII text; force UTF-8 stdio on Windows
+            env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", **job.env}
+            proc = subprocess.Popen(cmd.argv, stdout=logf, stderr=subprocess.STDOUT, cwd=ROOT, env=env)
+            self._current = (job, proc)
+            rc = proc.wait()
+            self._current = None
+            if job.cancel_requested:
+                break
+            if rc != 0:
+                job.returncode = rc
+                logf.write(f"\n[step failed: exit {rc}]\n")
+                if not cmd.run:   # a dataset step: everything after it needs its output
+                    job.status = "failed"
+                    return
+                failed_runs.append(cmd.run)
+
+        if job.cancel_requested:
+            job.status = "cancelled"
+        elif failed_runs:
+            job.status = "failed"
+            logf.write(f"\n[{len(failed_runs)} run(s) failed, the rest completed: {', '.join(failed_runs)}]\n")
+        else:
+            job.status, job.returncode = "done", 0
+
     def _worker(self):
         while True:
             job = self._next()
@@ -346,44 +362,14 @@ class JobQueue:
             job.status = "running"
             job.started = time.time()
             with open(job.log_path, "a", encoding="utf-8", errors="replace") as logf:
-                ok = True
-                for cmd in job.cmds:
-                    if job.cancel_requested:
-                        job.status, ok = "cancelled", False
-                        break
-                    if cmd.argv == [VAST_STOP]:
-                        self._vast_stop(job, logf)
-                        continue
-                    if cmd.label:
-                        logf.write("##step " + json.dumps({"label": cmd.label}) + "\n")
-                    logf.write("$ " + " ".join(cmd.argv) + "\n")
-                    logf.flush()
-                    # the pipeline scripts print emoji; force UTF-8 stdio on Windows
-                    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
-                           **job.env}
-                    proc = subprocess.Popen(cmd.argv, stdout=logf, stderr=subprocess.STDOUT,
-                                            cwd=ROOT, env=env)
-                    self._current = (job, proc)
-                    rc = proc.wait()
-                    self._current = None
-                    if job.cancel_requested:
-                        job.status, ok = "cancelled", False
-                        break
-                    if rc != 0:
-                        job.status, job.returncode, ok = "failed", rc, False
-                        logf.write(f"\n[job failed: exit {rc}]\n")
-                        break
-                if not ok and job.remote and not job.vast_stopped:
-                    # the remote run is detached on purpose, so killing our side
-                    # leaves it going; end it, then stop paying for the GPU
+                self._run(job, logf)
+                if job.status != "done" and job.remote and not job.vast_stopped:
+                    # the remote run is detached, so killing our side leaves it going: end it, then stop the GPU
                     try:
                         vast.kill_remote()
                     except Exception as e:
                         logf.write(f"\n[Vast.ai] could not reach the instance to end the run: {e}\n")
                     self._vast_stop(job, logf)
-                if ok:
-                    job.status = "done"
-                    job.returncode = 0
             job.scan()
             job.finished = time.time()
 
