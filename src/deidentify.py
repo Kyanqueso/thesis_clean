@@ -5,7 +5,15 @@ from __future__ import annotations
 import argparse
 import re
 import time
+from collections import Counter
 from pathlib import Path
+
+from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
+from tqdm import tqdm
+
+# organic_dataset imports this module back for scrub_pool; plain module imports keep that cycle safe
+import organic_dataset
+from progress import track  # src/progress.py: the dashboard's bar; tqdm stays for the terminal
 
 # patterns shared by the scrubber and the audit below, so the two cannot drift apart
 # internal mail-system addresses ("Jane Doe/HOU/ECT@ECT")
@@ -124,8 +132,6 @@ def _analyzer():
     global _ANALYZER
     if _ANALYZER is not None:
         return _ANALYZER
-    from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
-
     engine = AnalyzerEngine()
     custom = [
         ("INTERNAL_ADDRESS", "internal_address", P_INTERNAL_STRICT.pattern, 0.75),
@@ -243,8 +249,6 @@ P_CAPITALISED = re.compile(r"\b[A-Z][\w'-]{2,}\b")
 def person_vocabulary(samples: list[tuple[str, list[tuple[int, int, str, str]]]],
                       min_count: int = 3, min_ratio: float = 0.5) -> re.Pattern | None:
     """Names NER tagged PERSON at least min_count times and in at least min_ratio of their uses."""
-    from collections import Counter
-
     tagged: Counter[str] = Counter()
     seen: Counter[str] = Counter()
     for text, spans in samples:
@@ -269,12 +273,9 @@ def scrub_pool(pairs: list[tuple[str, str]], entities: tuple[str, ...] = BASE_EN
                min_count: int = 3, use_vocab: bool = True,
                progress: bool = True) -> tuple[list[tuple[str, str]], int]:
     """De-identify a whole pool; a name NER catches in one email is swept from all of them."""
-    from tqdm import tqdm
-
     cleaned = [(clean_residue(b), s) for b, s in pairs]
     it = cleaned
     if progress:
-        from progress import track   # the dashboard's bar; tqdm stays for the terminal
         it = track(tqdm(cleaned, desc="Presidio"), "anonymize", "emails", total=len(cleaned))
     detected = [((b, detect(b, entities)), (s, detect(s, entities))) for b, s in it]
 
@@ -404,9 +405,7 @@ AUDIT_SAMPLES = 25    # scrubbed emails written out for reading by hand
 
 def audit(limit: int, out: Path | None) -> int:
     """Scrub `limit` AESLC emails exactly as the dataset build does, report what is left, write samples."""
-    from organic_dataset import pull_aeslc  # heavy (datasets); only needed here
-
-    pool = pull_aeslc(limit, AUDIT_SEED, deidentify=False)
+    pool = organic_dataset.pull_aeslc(limit, AUDIT_SEED, scrub=False)
     bodies = [r["context"] for r in pool]
     subjects = [r["user_intent"] for r in pool]
 

@@ -1,10 +1,10 @@
 import argparse
-import warnings
 import faulthandler
 import json
 import platform
 import sys
 import time
+import warnings
 from pathlib import Path
 
 try:                      # Unix only; gives the kernel's peak-RSS high-water mark
@@ -13,60 +13,43 @@ try:                      # Unix only; gives the kernel's peak-RSS high-water ma
 except ImportError:
     _HAS_RESOURCE = False
 
-# on a native crash (SIGSEGV etc.), dump every thread's stack so the failing line is visible
-faulthandler.enable(all_threads=True)
-import progress  # src/progress.py: the marker lines the dashboard's bars read
+import joblib
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib
-# file-only backend: Windows' default TkAgg aborts when joblib threads collect its objects
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import psutil
 import seaborn as sns
-from sklearn.model_selection import train_test_split
+import umap
+from lightgbm import LGBMClassifier
+from scipy.stats import binom, chi2
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.manifold import TSNE
 from sklearn.metrics import (
     accuracy_score, average_precision_score, confusion_matrix, f1_score,
-    precision_score, recall_score, roc_auc_score, roc_curve,
-    precision_recall_curve, auc as auc_score
+    precision_recall_curve, precision_score, recall_score, roc_auc_score, roc_curve,
 )
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.svm import LinearSVC
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import make_pipeline
-import joblib
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import LinearSVC
+from xgboost import XGBClassifier
 
-try:
-    from xgboost import XGBClassifier
-    HAS_XGB = True
-except ImportError:
-    HAS_XGB = False
+import progress  # src/progress.py: the marker lines the dashboard's bars read
 
-try:
-    from lightgbm import LGBMClassifier
-    HAS_LGBM = True
-except ImportError:
-    HAS_LGBM = False
-
-try:
-    import umap
-    HAS_UMAP = True
-except ImportError:
-    HAS_UMAP = False
-
-try:
-    import psutil
-    HAS_PSUTIL = True
-except ImportError:
-    HAS_PSUTIL = False
-
+# on a native crash (SIGSEGV etc.), dump every thread's stack so the failing line is visible
+faulthandler.enable(all_threads=True)
+# file-only backend: Windows' default TkAgg aborts when joblib threads collect its objects
+matplotlib.use("Agg")
 warnings.filterwarnings("ignore", category=UserWarning)
 SEED = 42   # every random choice below (split, classifiers, projections, latency rows) uses it
 
 TEST_SIZE = 0.2            # used when the dataset has no build-time split column
+CAL_SIZE = 0.2             # share of the training rows held out to set the low-FPR thresholds
+TARGET_FPRS = (0.01, 0.001)   # thresholds are set on the calibration split, then reported on test
 ALPHA = 0.05               # family-wise significance level for the Holm-corrected McNemar tests
 MODES = ["normal", "user_intent_only", "context_only"]   # ablation modes compared across
 # single-row predictions timed per model for the latency distribution
@@ -85,34 +68,30 @@ def _peak_rss_bytes() -> float:
     if _HAS_RESOURCE:
         ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         return float(ru if sys.platform == "darwin" else ru * 1024)
-    if HAS_PSUTIL:
-        info = psutil.Process().memory_info()
-        return float(getattr(info, "peak_wset", info.rss))
-    return float("nan")
+    info = psutil.Process().memory_info()
+    return float(getattr(info, "peak_wset", info.rss))
 
 
 class _ResourceMeter:
     """Wall time, CPU-seconds and peak-RSS growth over a block; no sampler thread (it caused SIGSEGV)."""
 
     def __init__(self):
-        self._proc = psutil.Process() if HAS_PSUTIL else None
+        self._proc = psutil.Process()
         self.wall_seconds = 0.0
         self.cpu_seconds = float("nan")
         self.peak_rss_mb = float("nan")
 
     def __enter__(self):
         self._base_peak_rss = _peak_rss_bytes()
-        if self._proc:
-            ct = self._proc.cpu_times()
-            self._cpu0 = ct.user + ct.system
+        ct = self._proc.cpu_times()
+        self._cpu0 = ct.user + ct.system
         self._t0 = time.perf_counter()
         return self
 
     def __exit__(self, *exc):
         self.wall_seconds = time.perf_counter() - self._t0
-        if self._proc:
-            ct = self._proc.cpu_times()
-            self.cpu_seconds = (ct.user + ct.system) - self._cpu0
+        ct = self._proc.cpu_times()
+        self.cpu_seconds = (ct.user + ct.system) - self._cpu0
         peak = _peak_rss_bytes()
         if np.isfinite(peak) and np.isfinite(self._base_peak_rss):
             self.peak_rss_mb = max(0.0, (peak - self._base_peak_rss) / 1e6)
@@ -164,32 +143,26 @@ def _json_safe(obj):
 
 def environment_report() -> dict:
     """Machine facts the cost columns only mean something against."""
-    env = {
+    return {
         'platform': platform.platform(),
         'processor': platform.processor(),
         'python': platform.python_version(),
-        'psutil_available': HAS_PSUTIL,
+        'cpu_count_logical': psutil.cpu_count(logical=True),
+        'cpu_count_physical': psutil.cpu_count(logical=False),
+        'total_ram_gb': round(psutil.virtual_memory().total / 1e9, 2),
     }
-    if HAS_PSUTIL:
-        env['cpu_count_logical'] = psutil.cpu_count(logical=True)
-        env['cpu_count_physical'] = psutil.cpu_count(logical=False)
-        env['total_ram_gb'] = round(psutil.virtual_memory().total / 1e9, 2)
-    return env
 
 
 def get_classifiers() -> dict:
-    classifiers = {
+    return {
         "RandomForest": RandomForestClassifier(n_estimators=100, random_state=SEED, n_jobs=-1, max_depth=10),
         "LogisticRegression": make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000, random_state=SEED, n_jobs=-1)),
-        "SVM": make_pipeline(StandardScaler(), CalibratedClassifierCV(LinearSVC(dual=False, max_iter=1000, tol=1e-3, random_state=SEED), cv=5, n_jobs=-1))
-    }
-    if HAS_XGB:
-        classifiers["XGBoost"] = XGBClassifier(n_estimators=100, random_state=SEED, n_jobs=-1, eval_metric="logloss", verbosity=0)
-    if HAS_LGBM:
+        "SVM": make_pipeline(StandardScaler(), CalibratedClassifierCV(LinearSVC(dual=False, max_iter=1000, tol=1e-3, random_state=SEED), cv=5, n_jobs=-1)),
+        "XGBoost": XGBClassifier(n_estimators=100, random_state=SEED, n_jobs=-1, eval_metric="logloss", verbosity=0),
         # deterministic + row-wise: the same trees whatever the machine's thread count
-        classifiers["LightGBM"] = LGBMClassifier(n_estimators=100, random_state=SEED, n_jobs=-1, verbosity=-1,
-                                                 deterministic=True, force_row_wise=True)
-    return classifiers
+        "LightGBM": LGBMClassifier(n_estimators=100, random_state=SEED, n_jobs=-1, verbosity=-1,
+                                   deterministic=True, force_row_wise=True),
+    }
 
 def load_data(data_path: Path) -> pd.DataFrame | None:
     if not data_path.is_file():
@@ -203,9 +176,26 @@ def load_data(data_path: Path) -> pd.DataFrame | None:
     print(f"   - Benign: {(~labels.astype(bool)).sum():,} ({1-labels.mean():.1%})")
     return df
 
+def split_rows(df: pd.DataFrame, indices: np.ndarray, test_size: float,
+               seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Split `indices` grouped by document text when rows have documents, else stratified by label."""
+    sub = df.iloc[indices]
+    if "doc_id" not in df.columns:
+        return train_test_split(indices, test_size=test_size,
+                                stratify=sub["label"].values, random_state=seed)
+
+    # group by clean text, not doc_id, so twins and repeated documents stay on one side
+    key = sub["original_context"] if "original_context" in df.columns else sub["doc_id"]
+    groups = pd.factorize(key)[0]
+    uniq = np.unique(groups)
+    first = train_test_split(uniq, test_size=test_size, random_state=seed)[0]
+    in_first = np.isin(groups, first)
+    return indices[in_first], indices[~in_first]
+
+
 def split_by_doc(df: pd.DataFrame, indices: np.ndarray, test_size: float,
                  seed: int) -> tuple[np.ndarray, np.ndarray]:
-    """Train/test split: build-time `split` column, else grouped by document text, else stratified rows."""
+    """Train/test split: build-time `split` column, else split_rows."""
     # honour the build-time split; re-splitting would hand test attack types back to training
     if "split" in df.columns:
         in_train = (df["split"] == "train").to_numpy()
@@ -213,20 +203,7 @@ def split_by_doc(df: pd.DataFrame, indices: np.ndarray, test_size: float,
               f"{df.loc[~in_train, 'doc_id'].nunique():,} test documents"
               f" — test attack types were held out when the dataset was built.")
         return indices[in_train], indices[~in_train]
-
-    if "doc_id" not in df.columns:
-        return train_test_split(indices, test_size=test_size,
-                                stratify=df["label"].values, random_state=seed)
-
-    # group by clean text, not doc_id, so twins and repeated documents stay on one side
-    key = df["original_context"] if "original_context" in df.columns else df["doc_id"]
-    groups = pd.factorize(key)[0]
-    uniq = np.unique(groups)
-    train_groups = train_test_split(uniq, test_size=test_size, random_state=seed)[0]
-    in_train = np.isin(groups, train_groups)
-    print(f"\nGrouped split: {len(train_groups):,} train / {len(uniq) - len(train_groups):,}"
-          f" test distinct documents — no document text on both sides.")
-    return indices[in_train], indices[~in_train]
+    return split_rows(df, indices, test_size, seed)
 
 DECISION_THRESHOLD = 0.5
 
@@ -250,6 +227,28 @@ def quality_metrics(y_true, y_prob, threshold: float = DECISION_THRESHOLD) -> di
         'FPR': float(fp / (fp + tn)) if (fp + tn) else float('nan'),
         'FNR': float(fn / (fn + tp)) if (fn + tp) else float('nan'),
     }
+
+
+def threshold_for_fpr(benign_scores: np.ndarray, target: float) -> float:
+    """Lowest threshold (score >= threshold flags) whose FPR on these benign scores is at most target."""
+    s = np.sort(np.asarray(benign_scores, dtype=np.float64))[::-1]
+    k = int(np.floor(target * len(s) + 1e-9))   # benign rows allowed at or above the threshold
+    if k >= len(s):
+        return float("-inf")
+    return float(np.nextafter(s[k], np.inf))
+
+
+def operating_points(cal_prob, y_cal, test_prob, y_test) -> dict:
+    """Test TPR and FPR at the thresholds that give each target FPR on the calibration split."""
+    # float64 throughout: XGBoost returns float32, which would round the threshold back onto a tied score
+    cal_prob, test_prob = np.asarray(cal_prob, np.float64), np.asarray(test_prob, np.float64)
+    out = {}
+    for target in TARGET_FPRS:
+        t = threshold_for_fpr(cal_prob[y_cal == 0], target)
+        name = f"{target * 100:g}%FPR"
+        out[f"TPR@{name}"] = float((test_prob[y_test == 1] >= t).mean())
+        out[f"FPR@{name}"] = float((test_prob[y_test == 0] >= t).mean())
+    return out
 
 
 def train_evaluate(X_train, y_train, X_test, y_test, classifier, name):
@@ -284,8 +283,6 @@ def train_evaluate(X_train, y_train, X_test, y_test, classifier, name):
 
 def mcnemar_test(correct_a: np.ndarray, correct_b: np.ndarray) -> dict:
     """Paired McNemar test: exact binomial for few discordant pairs, else chi-square with Yates."""
-    from scipy.stats import binom, chi2
-
     b = int((correct_a & ~correct_b).sum())
     c = int((~correct_a & correct_b).sum())
     n = b + c
@@ -315,12 +312,12 @@ def holm_bonferroni(p_values: list[float]) -> list[float]:
     return adjusted.tolist()
 
 
-def _pairwise_mcnemar(entries: list[tuple[str, np.ndarray]], y_true: np.ndarray,
-                      alpha: float = 0.05) -> pd.DataFrame:
-    """All-pairs McNemar over (label, y_pred) entries sharing one test set."""
-    correct = {name: (pred == y_true) for name, pred in entries}
+def mcnemar_within_run(pred_labels: dict, y_true: np.ndarray,
+                       alpha: float = 0.05) -> pd.DataFrame:
+    """Every embedding x classifier combo of this run against every other."""
+    correct = {name: (pred == y_true) for name, pred in sorted(pred_labels.items())}
     rows = []
-    names = [n for n, _ in entries]
+    names = list(correct)
     for i, a in enumerate(names):
         for b_name in names[i + 1:]:
             res = mcnemar_test(correct[a], correct[b_name])
@@ -334,12 +331,6 @@ def _pairwise_mcnemar(entries: list[tuple[str, np.ndarray]], y_true: np.ndarray,
     df['p_holm'] = holm_bonferroni(df['p_value'].tolist())
     df['significant'] = df['p_holm'] < alpha
     return df.sort_values('p_holm').reset_index(drop=True)
-
-
-def mcnemar_within_run(pred_labels: dict, y_true: np.ndarray,
-                       alpha: float = 0.05) -> pd.DataFrame:
-    """Every embedding x classifier combo of this run against every other."""
-    return _pairwise_mcnemar(sorted(pred_labels.items()), y_true, alpha)
 
 
 # cross-ablation reads <modes_root>/<mode>/results/predictions.npz; each finished mode rewrites it
@@ -456,19 +447,14 @@ def plot_dimensionality_reduction(X, y, emb_name, out_dir):
         axes[1].set_ylabel('t-SNE 2')
         axes[1].grid(True, alpha=0.3)
 
-        if HAS_UMAP:
-            print("    - Computing UMAP...")
-            umap_reducer = umap.UMAP(n_components=2, random_state=SEED, n_neighbors=min(15, sample_size - 1))
-            X_umap = umap_reducer.fit_transform(X_sample)
-            axes[2].scatter(X_umap[:, 0], X_umap[:, 1], c=y_sample, cmap="RdYlBu", alpha=0.6, s=20)
-            axes[2].set_title(f'UMAP - {emb_name.upper()}')
-            axes[2].set_xlabel('UMAP 1')
-            axes[2].set_ylabel('UMAP 2')
-            axes[2].grid(True, alpha=0.3)
-        else:
-            axes[2].text(0.5, 0.5, 'UMAP not available\npip install umap-learn',
-                         ha='center', va='center', transform=axes[2].transAxes)
-            axes[2].set_title('UMAP - Not Available')
+        print("    - Computing UMAP...")
+        umap_reducer = umap.UMAP(n_components=2, random_state=SEED, n_neighbors=min(15, sample_size - 1))
+        X_umap = umap_reducer.fit_transform(X_sample)
+        axes[2].scatter(X_umap[:, 0], X_umap[:, 1], c=y_sample, cmap="RdYlBu", alpha=0.6, s=20)
+        axes[2].set_title(f'UMAP - {emb_name.upper()}')
+        axes[2].set_xlabel('UMAP 1')
+        axes[2].set_ylabel('UMAP 2')
+        axes[2].grid(True, alpha=0.3)
 
         cbar = fig.colorbar(
             scatter_plot, ax=axes, orientation="horizontal", location="bottom",
@@ -479,18 +465,17 @@ def plot_dimensionality_reduction(X, y, emb_name, out_dir):
         plt.savefig(out_dir / f'{emb_name}_dimensionality_reduction.png', dpi=300, bbox_inches='tight')
         plt.close(fig)
 
-def plot_roc_pr_curves(X_test, y_test, models, emb_name, out_dir):
+def plot_roc_pr_curves(y_test, probs: dict, emb_name, out_dir):
+    """probs: classifier name -> test-set scores. PR legends use average precision, like the PR-AUC column."""
     print(f"  Creating ROC and PR curves for {emb_name}...")
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
 
-    for name, model in models.items():
-        y_prob = model.predict_proba(X_test)[:, 1]
-
+    for name, y_prob in probs.items():
         fpr, tpr, _ = roc_curve(y_test, y_prob)
         ax1.plot(fpr, tpr, label=f'{name} (AUC = {roc_auc_score(y_test, y_prob):.3f})')
 
         precision, recall, _ = precision_recall_curve(y_test, y_prob)
-        ax2.plot(recall, precision, label=f'{name} (AUC = {auc_score(recall, precision):.3f})')
+        ax2.plot(recall, precision, label=f'{name} (AUC = {average_precision_score(y_test, y_prob):.3f})')
 
     ax1.plot([0, 1], [0, 1], 'k--', label='Chance')
     ax1.set(xlabel='False Positive Rate', ylabel='True Positive Rate', title=f'ROC Curves - {emb_name.upper()}')
@@ -560,53 +545,69 @@ def main():
     indices = np.arange(len(y))
 
     train_idx, test_idx = split_by_doc(df, indices, TEST_SIZE, SEED)
-    print(f"\nSplitting data: {len(train_idx):,} train, {len(test_idx):,} test samples "
+    # the low-FPR thresholds are set on training rows the classifiers never see, never on the test set
+    fit_idx, cal_idx = split_rows(df, train_idx, CAL_SIZE, SEED)
+    print(f"\nSplitting data: {len(fit_idx):,} fit, {len(cal_idx):,} calibration "
+          f"({int((y[cal_idx] == 0).sum()):,} benign), {len(test_idx):,} test samples "
           f"({y[test_idx].mean():.1%} malicious in test).")
 
-    y_train, y_test = y[train_idx], y[test_idx]
+    y_fit, y_cal, y_test = y[fit_idx], y[cal_idx], y[test_idx]
 
     available_embeddings = {p.stem.replace('_prompt', ''): p for p in EMBED_DIR.glob('*_prompt.npy')}
     if not available_embeddings:
         print(f"Error: no *_prompt.npy embeddings in {EMBED_DIR}. Run generate_embeddings.py first.")
         return 1
 
-    if not HAS_PSUTIL:
-        print("\nWarning: psutil is not installed; the CPU and memory columns will be NaN.")
-
     all_results = []
+    op_rows = []
     classifiers = get_classifiers()
     prediction_store = {}
     prediction_labels = {}
     emb_dims = {}
+    svm_solver = {}
 
     n_fits, fits_done = len(available_embeddings) * len(classifiers), 0
     for emb_name, emb_path in available_embeddings.items():
         print(f"\n{'='*70}\nProcessing Embeddings: {emb_name.upper()}\n{'='*70}")
 
         embeddings = np.load(emb_path)
-        X_train, X_test = embeddings[train_idx], embeddings[test_idx]
+        X_fit, X_cal, X_test = embeddings[fit_idx], embeddings[cal_idx], embeddings[test_idx]
         emb_dims[emb_name] = int(embeddings.shape[1])
+
+        # fewer distinct rows than dimensions (P1 intent-only: ~1,900 intents vs qwen3's 2,560) stalls the
+        # primal SVM solver for hours; the dual solver's iterations are cheap, so max_iter really caps its time
+        svm_dual = len({row.tobytes() for row in X_fit}) < X_fit.shape[1]
+        classifiers["SVM"].set_params(calibratedclassifiercv__estimator__dual=svm_dual)
+        svm_solver[emb_name] = "dual" if svm_dual else "primal"
 
         progress.mark("project", emb_name)
         plot_dimensionality_reduction(embeddings, y, emb_name, FIGURES_DIR)
 
-        trained_models = {}
+        test_probs = {}
         confusion_matrices = {}
         for clf_name, classifier in classifiers.items():
             progress.mark("train", f"{emb_name} · {clf_name}", fits_done, n_fits)
             fits_done += 1
             result, trained_model, y_prob, y_pred = train_evaluate(
-                X_train, y_train, X_test, y_test, classifier, clf_name)
+                X_fit, y_fit, X_test, y_test, classifier, clf_name)
             result['Embeddings'] = emb_name.upper()
             all_results.append(result)
-            trained_models[clf_name] = trained_model
+            cal_prob = trained_model.predict_proba(X_cal)[:, 1]
+            op_rows.append({'Embeddings': emb_name.upper(), 'Classifier': clf_name,
+                            **operating_points(cal_prob, y_cal, y_prob, y_test)})
+            if clf_name == "SVM":
+                svc = trained_model[-1]
+                if max(c.estimator.n_iter_ for c in svc.calibrated_classifiers_) >= svc.estimator.max_iter:
+                    print(f"      SVM stopped at its {svc.estimator.max_iter}-iteration cap "
+                          f"({svm_solver[emb_name]} solver): no clean boundary in this data")
+            test_probs[clf_name] = y_prob
             confusion_matrices[clf_name] = np.array([[result['TN'], result['FP']],
                                                      [result['FN'], result['TP']]])
             prediction_store[f"{emb_name}__{clf_name}"] = y_prob.astype(np.float32)
             prediction_labels[f"{emb_name}__{clf_name}"] = y_pred.astype(np.int8)
             joblib.dump(trained_model, MODELS_DIR / f"{emb_name}_{clf_name}.joblib")
 
-        plot_roc_pr_curves(X_test, y_test, trained_models, emb_name, FIGURES_DIR)
+        plot_roc_pr_curves(y_test, test_probs, emb_name, FIGURES_DIR)
         plot_confusion_matrices(confusion_matrices, emb_name, FIGURES_DIR)
 
     progress.mark("report", "tables, significance tests, figures")
@@ -629,6 +630,12 @@ def main():
     results_df.to_csv(RESULTS_DIR / 'full_evaluation_results.csv', index=False)
     print(f"   Full results saved to: {RESULTS_DIR / 'full_evaluation_results.csv'}")
 
+    ops_df = pd.DataFrame(op_rows)
+    ops_df.to_csv(RESULTS_DIR / 'operating_points.csv', index=False)
+    print(f"   Operating points (thresholds set on the calibration split) saved to: "
+          f"{RESULTS_DIR / 'operating_points.csv'}")
+    print((ops_df.set_index(['Embeddings', 'Classifier']) * 100).round(2).to_string())
+
     # per-sample probabilities, read by the dashboard and by the cross-ablation McNemar
     np.savez_compressed(RESULTS_DIR / 'predictions.npz',
                         y_true=y_test.astype(np.int8), test_idx=test_idx, **prediction_store)
@@ -640,11 +647,6 @@ def main():
         n_sig = int(within['significant'].sum())
         print(f"   McNemar (within run): {len(within)} pairs, {n_sig} significant at "
               f"Holm alpha={ALPHA} → {RESULTS_DIR / 'mcnemar_within_run.csv'}")
-        top = within.head(3)
-        for _, r in top.iterrows():
-            print(f"      · {r['Model-A']} vs {r['Model-B']}: "
-                  f"Δacc {r['Acc-Diff(A-B)']:+.4f}, b={r['b']} c={r['c']}, "
-                  f"p_holm={r['p_holm']:.3e} ({r['method']})")
 
     # cross-ablation: the pipeline folder holds every mode's run; each finished mode rewrites the tables
     modes_root = args.run_dir.parent
@@ -667,24 +669,22 @@ def main():
               f"({', '.join(sorted(aligned))}): {len(ablation_mcnemar)} paired tests, "
               f"{int(ablation_mcnemar['significant'].sum())} significant → {mc_path}")
         print(f"   Absolute performance degradation → {deg_path}")
-        headline = (ablation_degradation
-                    .groupby(['Reference-Mode', 'Variant-Mode'])[[f'Deg-{m}' for m in DEGRADATION_METRICS]]
-                    .mean())
-        print("\nAbsolute performance degradation, mean over matched configurations "
-              "(percentage points; positive = variant is worse):")
-        print((headline * 100).round(2).to_string())
 
     run_meta = {
         'data_file': str(args.data),
         'n_samples': int(len(y)),
         'n_malicious': int(y.sum()),
         'n_benign': int(len(y) - y.sum()),
-        'n_train': int(len(train_idx)),
+        'n_train': int(len(fit_idx)),
+        'n_calibration': int(len(cal_idx)),
         'n_test': int(len(test_idx)),
         'test_size': TEST_SIZE,
+        'calibration_size': CAL_SIZE,
+        'target_fprs': list(TARGET_FPRS),
         'seed': SEED,
         'embedding_dims': emb_dims,
         'classifiers': list(classifiers.keys()),
+        'svm_solver': svm_solver,
         'decision_threshold': DECISION_THRESHOLD,
         'latency_repeats': LATENCY_REPEATS,
         'alpha': ALPHA,

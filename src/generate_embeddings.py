@@ -5,26 +5,17 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import tiktoken
+import torch
+from dotenv import load_dotenv
+from openai import OpenAI
+from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 import progress  # src/progress.py: the marker lines the dashboard's bars read
-
-try:
-    import torch
-    from sentence_transformers import SentenceTransformer
-    from openai import OpenAI
-    from dotenv import load_dotenv
-    import tiktoken
-except ImportError as e:
-    # name the missing package, so the fix is obvious
-    _PIP_NAME = {"sentence_transformers": "sentence-transformers", "dotenv": "python-dotenv"}
-    _missing = getattr(e, "name", None) or "one of the required libraries"
-    print(f"Error: '{_missing}' is not installed ({e}).")
-    print(f"   Install it with:  pip install {_PIP_NAME.get(_missing, _missing)}")
-    print("   Or reinstall all of them:  pip install -r requirements.txt")
-    exit(1)
 
 load_dotenv()
 
@@ -113,15 +104,6 @@ def _embed_batch(batch: list[str], model_id: str, attempts: int = 6):
             time.sleep(wait)
 
 
-def get_tokenizer(model_id: str) -> tiktoken.Encoding:
-    """Get the tokenizer for a given OpenAI model, with a fallback."""
-    try:
-        return tiktoken.encoding_for_model(model_id)
-    except KeyError:
-        print(f"Warning: Tokenizer for '{model_id}' not found. Using 'cl100k_base'.")
-        return tiktoken.get_encoding("cl100k_base")
-
-
 def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_type: str, dtype: str = None, max_seq_length: int = None, item: str = "") -> np.ndarray:
 
     if embed_type == 'sbert':
@@ -142,7 +124,7 @@ def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_
         if not OPENAI_ENABLED:
             raise RuntimeError("OpenAI API key is not configured. Cannot generate embeddings.")
 
-        tokenizer = get_tokenizer(model_id)
+        tokenizer = tiktoken.encoding_for_model(model_id)
 
         # tokenize once: the counts drive the pacing, and truncation keeps every input under the limit
         prepared, counts, n_truncated = [], [], 0
@@ -205,40 +187,14 @@ MODELS = {
 }
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Generate text embeddings using various models.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument(
-        "--data",
-        type=Path,
-        required=True,
-        help="Path to the input dataset (.jsonl file)."
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Force regeneration of embeddings, overwriting existing files."
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["normal", "user_intent_only", "context_only"],
-        default="normal",
-        help="Which column(s) to embed: both combined, user_intent alone, or context alone."
-    )
-    parser.add_argument(
-        "--embed-dir",
-        type=Path,
-        required=True,
-        help="Directory to write generated embeddings to (a run's embeddings/ folder)."
-    )
-    parser.add_argument(
-        "--models",
-        type=str,
-        default=None,
-        help=f"Comma-separated subset of models to run ({', '.join(MODELS.keys())}). Default: all."
-    )
-    parser.add_argument("--_single", type=str, default=None, help=argparse.SUPPRESS)
+    parser = argparse.ArgumentParser(description="Embed one dataset with each embedding model.")
+    parser.add_argument("--data", type=Path, required=True, help="The dataset (.jsonl).")
+    parser.add_argument("--embed-dir", type=Path, required=True, help="A run's embeddings/ folder.")
+    parser.add_argument("--mode", choices=["normal", "user_intent_only", "context_only"], default="normal",
+                        help="Embed intent + context, the intent alone, or the context alone.")
+    parser.add_argument("--models", help=f"Comma-separated subset of {', '.join(MODELS)}. Default: all.")
+    parser.add_argument("--force", action="store_true", help="Recompute embeddings that already exist.")
+    parser.add_argument("--_single", help=argparse.SUPPRESS)
     args = parser.parse_args()
     EMBED_DIR = args.embed_dir
     EMBED_DIR.mkdir(parents=True, exist_ok=True)
@@ -294,28 +250,14 @@ def main():
             if result.returncode != 0:
                 print(f"  Subprocess for '{key}' exited with code {result.returncode}.")
 
-        print("\nSummary of embedding files:")
-        produced, absent = [], []
-        for key in requested:
-            output_path = EMBED_DIR / f"{key}_prompt.npy"
-            if output_path.exists():
-                size_mb = output_path.stat().st_size / 1e6
-                print(f"   {output_path.name:<25} ({size_mb:.2f} MB)")
-                produced.append(key)
-            else:
-                why = "" if MODELS[key]["enabled"] else "  <- model disabled (missing API key?)"
-                print(f"   {output_path.name:<25} (not generated){why}")
-                absent.append(key)
-
         # fail when a requested backend produced nothing, so the sweep records it as a failure
+        absent = [k for k in requested if not (EMBED_DIR / f"{k}_prompt.npy").exists()]
+        print("\nEmbedding files: " + ", ".join(f"{k} {'MISSING' if k in absent else 'ok'}" for k in requested))
         if absent:
-            print(f"\nNo embeddings produced for: {', '.join(absent)}")
-            print("   If a key is missing: export OPENAI_API_KEY / HF_TOKEN and re-run.")
-            print("   If you did not want these backends, pass --models "
-                  f"{','.join(produced) or '<backends you want>'}.")
+            print(f"No embeddings produced for: {', '.join(absent)} "
+                  f"(missing OPENAI_API_KEY? or pick backends with --models)")
             return 1
-
-        print("\n\nEmbedding generation completed!")
+        print("\nEmbedding generation completed!")
         return 0
 
     if not args.data.is_file():
@@ -329,13 +271,7 @@ def main():
         print(f"Error reading JSONL file: {e}")
         return 1
 
-    print("Dataset Statistics:")
-    print(f"   - Total samples: {len(df):,}")
-    if 'label' in df.columns:
-        malicious_count = df['label'].sum()
-        total_count = len(df)
-        print(f"   - Malicious: {malicious_count:,} ({malicious_count/total_count:.1%})")
-        print(f"   - Benign: {total_count - malicious_count:,} ({(total_count - malicious_count)/total_count:.1%})")
+    print(f"   {len(df):,} samples" + (f", {df['label'].mean():.1%} malicious" if "label" in df else ""))
 
     if args.mode == "user_intent_only":
         print("\nMode: user_intent_only — embedding user_intent alone")

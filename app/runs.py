@@ -353,7 +353,7 @@ def sample_rows(pipeline: str, n: int = 1, seed: int | None = None) -> list[dict
 # ---------------- file explorer (expected-vs-actual manifest) ----------------
 
 EXPECTED_RESULTS = ["full_evaluation_results.csv", "mcnemar_within_run.csv",
-                    "predictions.npz", "run_meta.json"]
+                    "operating_points.csv", "predictions.npz", "run_meta.json"]
 
 
 # What /api/file/inspect can actually show. Anything else answers with a size

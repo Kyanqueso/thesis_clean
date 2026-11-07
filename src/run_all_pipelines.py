@@ -10,22 +10,8 @@ ROOT_DIR = SCRIPT_DIR.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+import progress  # noqa: E402  (src/progress.py: the marker lines the dashboard's bars read)
 from pipeline_paths import DATA_DIR, DATASETS, MODES, RUNS_DIR  # noqa: E402
-
-import progress  # src/progress.py: the marker lines the dashboard's bars read
-
-
-def describe_exit(code: int) -> str:
-    """Human-readable exit status; a negative code means the child was killed by a signal."""
-    if code >= 0:
-        return f"exit {code}"
-    import signal
-    try:
-        sig = signal.Signals(-code)
-        return (f"exit {code} — killed by {sig.name} ({sig.value}); "
-                f"look for the faulthandler dump above")
-    except ValueError:
-        return f"exit {code} — killed by signal {-code}"
 
 
 def run_step(cmd: list[str], label: str) -> bool:
@@ -36,7 +22,7 @@ def run_step(cmd: list[str], label: str) -> bool:
     print("   $", " ".join(str(c) for c in cmd), flush=True)
     result = subprocess.run(cmd)
     if result.returncode != 0:
-        print(f"\n  FAILED ({describe_exit(result.returncode)}): {label}", flush=True)
+        print(f"\n  FAILED (exit {result.returncode}): {label}", flush=True)
         print("     continuing with the remaining runs.", flush=True)
         return False
     return True

@@ -4,15 +4,14 @@ import json
 import sys
 from pathlib import Path
 
+from datasets import load_dataset
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from datasets import load_dataset  # noqa: E402
-
+import progress  # noqa: E402  (src/progress.py: the marker lines the dashboard's bars read)
 from pipeline_paths import DATA_DIR, DATASETS  # noqa: E402
-
-import progress  # src/progress.py: the marker lines the dashboard's bars read
 
 out_path = DATA_DIR / DATASETS["pipeline1_alamsabi"]
 out_path.parent.mkdir(parents=True, exist_ok=True)

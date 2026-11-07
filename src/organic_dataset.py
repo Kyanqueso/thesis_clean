@@ -3,27 +3,25 @@ import random
 import sys
 from pathlib import Path
 
+import nltk
 import pandas as pd
 import requests
+from datasets import concatenate_datasets, load_dataset
+from nltk.tokenize import PunktSentenceTokenizer
 from tqdm import tqdm
-
-try:
-    from datasets import load_dataset, concatenate_datasets
-except ImportError:
-    print("Error: Required library not installed. Please run: pip install datasets")
-    exit(1)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+# deidentify imports this module back for its audit; plain module imports keep that cycle safe
+import deidentify  # noqa: E402
+import progress  # noqa: E402  (src/progress.py: the marker lines the dashboard's bars read)
 from pipeline_paths import DATA_DIR, DATASETS  # noqa: E402
 
-import progress  # src/progress.py: the marker lines the dashboard's bars read
-
 SEED = 42
-PIPELINE2_N_PER_SOURCE = 7000
+N_PER_SOURCE = 7000   # documents per organic source, in both pipeline 2 and pipeline 3
 TRAIN_FRAC = 0.8   # pipeline 3: share of documents assigned to train at build time
 ALAMSABI_PATH = DATA_DIR / DATASETS["pipeline1_alamsabi"]
 
@@ -48,7 +46,6 @@ CNN_TEMPLATES = [
 
 def ensure_nltk_punkt():
     """Make sure nltk's sentence tokenizer models are available for insert_middle."""
-    import nltk
     for pkg in ["punkt", "punkt_tab"]:
         try:
             nltk.data.find(f"tokenizers/{pkg}")
@@ -120,7 +117,6 @@ def insert_start(context: str, attack: str, rng: random.Random) -> str:
 
 
 def insert_middle(context: str, attack: str, rng: random.Random) -> str:
-    from nltk.tokenize import PunktSentenceTokenizer
     spans = list(PunktSentenceTokenizer().span_tokenize(context))
     if not spans:
         return insert_end(context, attack, rng)
@@ -199,7 +195,7 @@ def pull_cosqa(n: int, seed: int) -> list[dict]:
     return _collect(entries(), n, "CoSQA")
 
 
-def pull_aeslc(n: int, seed: int, deidentify: bool = True) -> list[dict]:
+def pull_aeslc(n: int, seed: int, scrub: bool = True) -> list[dict]:
 
     print(f"  Pulling AESLC email (target {n:,} rows)...")
     ds = load_dataset("Yale-LILY/aeslc")
@@ -220,11 +216,10 @@ def pull_aeslc(n: int, seed: int, deidentify: bool = True) -> list[dict]:
         if len(candidates) >= int(n * 1.2) + 50:
             break
 
-    if deidentify:
-        from deidentify import scrub_pool
+    if scrub:
         print(f"   de-identifying {len(candidates):,} emails "
               f"(Presidio + custom recognizers + pool name vocabulary)...")
-        candidates, vocab_size = scrub_pool(candidates)
+        candidates, vocab_size = deidentify.scrub_pool(candidates)
         print(f"   name vocabulary: {vocab_size:,} names swept over every email")
 
     # re-check lengths (scrubbing can push a body under the floor) and dedup on the scrubbed text
@@ -256,11 +251,11 @@ def pull_cnn_dailymail(n: int, seed: int) -> list[dict]:
 
 
 SOURCES = {
-    "ms_marco": {"display": "MS MARCO v2.1", "pipeline3_n": 7000, "pull": pull_ms_marco, "attack_kind": "text"},
-    "fetaqa": {"display": "FeTaQA", "pipeline3_n": 7000, "pull": pull_fetaqa, "attack_kind": "text"},
-    "cosqa": {"display": "CoSQA", "pipeline3_n": 7000, "pull": pull_cosqa, "attack_kind": "code"},
-    "aeslc": {"display": "AESLC Email", "pipeline3_n": 7000, "pull": pull_aeslc, "attack_kind": "text"},
-    "cnn_dailymail": {"display": "CNN/DailyMail", "pipeline3_n": 7000, "pull": pull_cnn_dailymail, "attack_kind": "text"},
+    "ms_marco": {"display": "MS MARCO v2.1", "pull": pull_ms_marco, "attack_kind": "text"},
+    "fetaqa": {"display": "FeTaQA", "pull": pull_fetaqa, "attack_kind": "text"},
+    "cosqa": {"display": "CoSQA", "pull": pull_cosqa, "attack_kind": "code"},
+    "aeslc": {"display": "AESLC Email", "pull": pull_aeslc, "attack_kind": "text"},
+    "cnn_dailymail": {"display": "CNN/DailyMail", "pull": pull_cnn_dailymail, "attack_kind": "text"},
 }
 
 
@@ -366,11 +361,10 @@ def main() -> int:
     print("\nPulling organic sources...")
     pools = {}
     for k, (key, meta) in enumerate(SOURCES.items()):
-        n = meta["pipeline3_n"]
         progress.mark("pull", meta["display"], k, len(SOURCES))
-        rows = meta["pull"](n, SEED)
-        if len(rows) < n:
-            print(f"  Warning: only found {len(rows):,}/{n:,} usable rows for '{key}'")
+        rows = meta["pull"](N_PER_SOURCE, SEED)
+        if len(rows) < N_PER_SOURCE:
+            print(f"  Warning: only found {len(rows):,}/{N_PER_SOURCE:,} usable rows for '{key}'")
         pools[key] = rows
 
     progress.mark("build", "pipeline 3 (organic, self-injected)", 0, 2)
@@ -388,7 +382,7 @@ def main() -> int:
 
     progress.mark("build", "pipeline 2 (organic + BIPIA)", 1, 2)
     print("\nBuilding pipeline 2 dataset (organic benign + Alamsabi BIPIA malicious)...")
-    pipeline2_rows = build_pipeline2(pools, rng, ALAMSABI_PATH, PIPELINE2_N_PER_SOURCE)
+    pipeline2_rows = build_pipeline2(pools, rng, ALAMSABI_PATH, N_PER_SOURCE)
     write_jsonl(pipeline2_rows, out_dir / DATASETS["pipeline2_organic_bipia"])
 
     print("\nOrganic dataset construction completed!")
