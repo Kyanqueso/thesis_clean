@@ -30,7 +30,7 @@ load_dotenv()
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
-# joins context and intent in normal mode; app/detect.py must use the same one
+# normal mode embeds user_intent + SEPARATOR + context; app/detect.py must build it the same way
 SEPARATOR = "\n\n---\n\n"
 
 try:
@@ -344,10 +344,11 @@ def main():
         print("\nMode: context_only — embedding context alone")
         combined_texts = df["context"].astype(str).tolist()
     else:
-        print(f"\nMode: normal — combining context and user intent using separator: '{SEPARATOR.strip()}'")
+        print(f"\nMode: normal — user intent first, then context, joined by: '{SEPARATOR.strip()}'")
+        # intent first, so a truncating model (MiniLM: 256 tokens) loses the end of the context, never the intent
         combined_texts = [
-            f"{context}{SEPARATOR}{intent}"
-            for context, intent in zip(df["context"].astype(str), df["user_intent"].astype(str))
+            f"{intent}{SEPARATOR}{context}"
+            for intent, context in zip(df["user_intent"].astype(str), df["context"].astype(str))
         ]
 
     print("Sample combined text (first 200 chars):")

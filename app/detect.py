@@ -94,7 +94,7 @@ def score(pipeline: str, mode: str, emb: str, clf: str,
     elif mode == "context_only":
         text = context
     else:
-        text = f"{context}{SEPARATOR}{user_intent}"
+        text = f"{user_intent}{SEPARATOR}{context}"   # same order as src/generate_embeddings.py
     if not text.strip():
         return {"error": "empty input"}
 

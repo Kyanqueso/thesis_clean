@@ -1,6 +1,6 @@
 # Indirect Prompt Injection Detection (Thesis)
 
-Detects indirect prompt injection by embedding `(context, user_intent)` pairs and
+Detects indirect prompt injection by embedding `(user_intent, context)` pairs and
 classifying them with a decision threshold. A local dashboard shows the results
 and lets you test the trained classifiers on your own text.
 
