@@ -21,6 +21,7 @@ transformers==5.8.0
 openai==2.36.0
 tiktoken==0.14.0
 python-dotenv==1.1.1
+nvidia-ml-py==13.610.43   # GPU % in src/benchmark_resources.py (NVIDIA only)
 
 # dashboard
 fastapi==0.136.1

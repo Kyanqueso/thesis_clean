@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>thesis_clean dashboard</title>
-<link rel="stylesheet" href="/static/style.css?v=45">
+<link rel="stylesheet" href="/static/style.css?v=46">
 </head>
 <body>
 <header>
@@ -21,6 +21,7 @@
     <button data-go="master-card">Master results</button>
     <button data-go="ablation-card">Ablation</button>
     <button data-go="allrows-card">All runs</button>
+    <button data-go="resources-card">Resources</button>
     <button data-go="figures-card">Figures</button>
   </nav>
   <div id="queue-pill" class="pill">idle</div>
@@ -215,6 +216,16 @@
     <div id="rf-body"></div>
   </div>
 
+  <div class="card" id="resources-card">
+    <h2>Resources used <span class="muted">— GPU, CPU, memory, time and disk, measured on one PC</span></h2>
+    <div class="ab-pick" id="rs-pick">
+      <div class="grp"><span class="lbl">Rows</span><div id="rs-rows" class="grp"></div></div>
+      <span class="pick-hint">pipelines follow the P1 / P2 / P3 filter above</span>
+    </div>
+    <div class="scroll"><table id="rs-table" class="master"></table></div>
+    <div id="rs-key" class="key"></div>
+  </div>
+
   <div class="card" id="figures-card">
     <h2>Figures</h2>
     <div class="fig-pick">
@@ -362,6 +373,6 @@
   </div>
 </dialog>
 
-<script src="/static/app.js?v=42"></script>
+<script src="/static/app.js?v=43"></script>
 </body>
 </html>

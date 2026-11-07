@@ -15,7 +15,7 @@ function renderPipeChips() {
   const el = $("#pipe-chips");
   el.innerHTML = `<span class="lbl">Focus — all cards</span>` + ALL_PIPES.map((p) =>
     `<span class="pipe-chip ${PIPE_FOCUS.has(p) ? "sel" : ""}" data-pipe="${p}" data-tip="${esc(pLabel(p))}">${pShort(p)}</span>`).join("");
-  $$(".pipe-chip").forEach((c) => c.addEventListener("click", () => {
+  $$("#pipe-chips .pipe-chip").forEach((c) => c.addEventListener("click", () => {
     const p = c.dataset.pipe;
     if (PIPE_FOCUS.has(p)) {
       if (PIPE_FOCUS.size === 1) return; // keep at least one selected
@@ -28,6 +28,7 @@ function renderPipeChips() {
     renderMaster();
     renderAblation();
     renderResultsTable();
+    renderResources();
     renderFigPicker();
   }));
 }
@@ -185,7 +186,7 @@ $$(".tab-btn").forEach((b) => b.addEventListener("click", () => {
    Jump links in the sticky header, shown on the Analysis tab only. The section
    currently under the header is highlighted as the page scrolls, and links to
    cards that are hidden (no results yet) are hidden with them. */
-const SEC_IDS = ["master-card", "ablation-card", "allrows-card", "figures-card"];
+const SEC_IDS = ["master-card", "ablation-card", "allrows-card", "resources-card", "figures-card"];
 const PAGE_HEADER = $("body > header");
 
 // the header's real height, so a jump lands just below it instead of under it
@@ -196,7 +197,11 @@ $("#sec-nav").addEventListener("click", (e) => {
   const b = e.target.closest("button[data-go]");
   if (!b) return;
   if (b.dataset.go === "top") window.scrollTo({ top: 0, behavior: "smooth" });
-  else document.getElementById(b.dataset.go).scrollIntoView({ behavior: "smooth", block: "start" });
+  else {
+    const card = document.getElementById(b.dataset.go);
+    setCollapsed(card, false);   // jumping to a folded card opens it
+    card.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 });
 
 function updateSecNav() {
@@ -683,7 +688,7 @@ async function loadResults() {
   try { RESULTS = (await fetchJSON("/api/results")).rows; } catch { RESULTS = []; }
   const empty = !RESULTS.length;
   $("#no-results-card").style.display = empty ? "" : "none";
-  for (const id of ["#master-card", "#ablation-card", "#allrows-card", "#figures-card"])
+  for (const id of ["#master-card", "#ablation-card", "#allrows-card", "#resources-card", "#figures-card"])
     $(id).style.display = empty ? "none" : "";
   updateSecNav();
   if (empty) return;
@@ -692,6 +697,7 @@ async function loadResults() {
   loadMaster();
   renderAblation();
   renderResultsTable();
+  loadResources();
   renderFigPicker();
   updateSecNav();
 }
@@ -701,10 +707,10 @@ function runKey(r) { return `${r.Pipeline}|${r.Mode}`; }
 /* ---------- master results: one grid across every pipeline ---------- */
 let MASTER = null;
 
-const MASTER_COST = [
-  ["Latency-P50(ms)", "p50 ms", 2], ["Latency-P99(ms)", "p99 ms", 2],
-  ["Train-Time(s)", "fit s", 1], ["Train-PeakRSS(MB)", "RSS MB", 0],
-  ["Train-PeakVRAM(MB)", "VRAM MB", 0],
+// [TPR column, header, the FPR that cutoff actually gave on test]
+const MASTER_LOWFPR = [
+  ["TPR@1%FPR", "TPR @1% FPR", "FPR@1%FPR", "1%"],
+  ["TPR@0.1%FPR", "TPR @0.1% FPR", "FPR@0.1%FPR", "0.1%"],
 ];
 
 // the one long classifier name sets the column width for every row
@@ -730,12 +736,10 @@ const COL_TIP = {
   "ROC-AUC": "ROC-AUC: chance that a random malicious row scores higher than a random benign one.\n0.5 = guessing, 1.0 = perfect. Uses no threshold.",
   "PR-AUC": "PR-AUC: area under the precision–recall curve (average precision).\nUses no threshold. On a balanced test set, guessing scores about 0.5.",
   "FPR": "False-positive rate: share of benign rows wrongly flagged as malicious.\nFP / (FP + TN), at the 0.5 threshold.",
-  "FNR": "False-negative rate: share of malicious rows missed.\nFN / (FN + TP), at the 0.5 threshold.",
-  "Latency-P50(ms)": "Median time for the classifier to score one row, in milliseconds.",
-  "Latency-P99(ms)": "99th-percentile time to score one row, in milliseconds: the slow tail.",
-  "Train-Time(s)": "Time to train the classifier, in seconds.",
-  "Train-PeakRSS(MB)": "Peak memory while training, in MB.\nReads 0 for many runs, so treat it as unreliable.",
-  "Train-PeakVRAM(MB)": "Peak GPU memory while training, in MB.",
+  "TPR@1%FPR": "Share of malicious prompts caught when the cutoff is set so only 1% of benign prompts get flagged.\n"
+    + "The cutoff is chosen on held-out training rows, then applied to the test set. Hover a value for the false-alarm rate it actually gave.",
+  "TPR@0.1%FPR": "Share of malicious prompts caught when the cutoff is set so only 0.1% of benign prompts (1 in 1,000) get flagged.\n"
+    + "The cutoff is chosen on held-out training rows, then applied to the test set. Hover a value for the false-alarm rate it actually gave.",
 };
 
 const SIG_NOTE = "ns = not statistically significant: McNemar test, Holm-corrected, p ≥ 0.05.\n"
@@ -819,10 +823,11 @@ function renderMaster() {
      An em-dash grid reads as a broken table; drop what has no data anywhere. */
   const has = (key) => rows.some((r) => typeof r[key] === "number");
   const q = ["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC", "PR-AUC"].filter(has);
-  const errs = ["FPR", "FNR"].filter(has);
+  const errs = ["FPR"].filter(has);
+  const lowFpr = MASTER_LOWFPR.filter(([k]) => has(k));
   const degVars = MASTER.variants.filter((v) => has(`Deg:${v}:${metric}`));
-  const cost = MASTER_COST.filter(([k]) => has(k));
-  const dropped = (6 - q.length) + (2 - errs.length) + (MASTER.variants.length - degVars.length);
+  const dropped = (6 - q.length) + (1 - errs.length) + (MASTER_LOWFPR.length - lowFpr.length)
+    + (MASTER.variants.length - degVars.length);
 
   const qShort = { "Accuracy": "Acc", "Precision": "Prec", "Recall": "Rec",
                    "F1-Score": "F1", "ROC-AUC": "ROC-AUC", "PR-AUC": "PR-AUC" };
@@ -841,17 +846,18 @@ function renderMaster() {
     ${band(3, "Configuration", "Which run the row describes.")}
     ${band(q.length, `Detection — ${esc(refName)}`,
       `How well the ${refName} run detects injections.\nThreshold metrics use 0.5; ROC-AUC and PR-AUC use no threshold.`)}
-    ${band(errs.length, "Errors", "The two ways to be wrong: flagging benign rows (FPR) and missing malicious ones (FNR).")}
+    ${band(errs.length, "Errors", "False alarms: benign rows wrongly flagged as malicious, at the 0.5 threshold.")}
+    ${band(lowFpr.length, "Low false-alarm",
+      "How many attacks are still caught when the cutoff is moved so false alarms stay rare.\nThe cutoff is set on held-out training rows, never on the test set.")}
     ${band(degVars.length, `Ablation Δ ${esc(metric)} (pp)`,
       `How much ${metric} drops when part of the input is removed: ${refName} − ablated, in percentage points.\n`
       + `Positive = removing it hurt.\n${SIG_NOTE}`)}
-    ${band(cost.length, "Cost", "Speed and memory of the classifier.")}
     </tr>`;
   head += `<tr>${th("Pipeline", COL_TIP.Pipeline)}${th("Emb", COL_TIP.Emb)}${th("Classifier", clfTip)}
     ${q.map((m) => th(qShort[m], COL_TIP[m], "num")).join("")}
     ${errs.map((e) => th(e, COL_TIP[e], "num")).join("")}
+    ${lowFpr.map(([k, l]) => th(l, COL_TIP[k], "num")).join("")}
     ${degVars.map((v) => th(`→${MODE_SHORT[v]}`, deltaTip(v, ref), "num")).join("")}
-    ${cost.map(([k, l]) => th(l, COL_TIP[k], "num")).join("")}
     </tr>`;
 
   let body = "", lastPipe = null;
@@ -866,8 +872,9 @@ function renderMaster() {
       <td>${esc(CLF_SHORT[r.Classifier] || r.Classifier)}</td>
       ${q.map((m) => `<td class="num">${mfmt(r[m])}</td>`).join("")}
       ${errs.map((e) => `<td class="num">${mfmt(r[e])}</td>`).join("")}
+      ${lowFpr.map(([k, , fk, target]) => `<td class="num"${typeof r[fk] === "number"
+        ? tipAttr(`Cutoff aimed at ${target} false alarms; on the test set it gave ${(r[fk] * 100).toFixed(2)}%.`) : ""}>${mfmt(r[k])}</td>`).join("")}
       ${degVars.map((v) => degCell(r[`Deg:${v}:${metric}`], r[`Sig:${v}:significant`], v, r[`Sig:${v}:p_holm`])).join("")}
-      ${cost.map(([k, , p]) => `<td class="num">${mfmt(r[k], p)}</td>`).join("")}
       </tr>`;
   }
   $("#master-table").innerHTML = head + body;
@@ -1310,6 +1317,140 @@ function renderRfHeat(rows, picks) {
         <span><i class="key-pick"></i>outlined = the classifier Master results shows</span>
         <span><b class="key-bad">red</b> = below chance</span></div>`
     : `<span class="muted">Nothing to show for this selection.</span>`;
+}
+
+/* ---------- resources ----------
+   One row per pipeline × embedding × classifier, normal mode, all measured on one
+   benchmark PC by src/benchmark_resources.py. The embedding columns are shared by
+   every classifier on that embedding, so they span the group's rows. */
+let RES = null;
+const RS = { rows: "best" };
+
+const RS_TIP = {
+  vram: "Most GPU memory PyTorch held while embedding the sample prompts, in MB.\nOpenAI has none: it runs on OpenAI's servers.",
+  gpu: "How busy the GPU was while embedding: average / highest, in %.\nMeasured for the whole card, so other GPU programs were closed.",
+  embdisk: "Disk space of the stored embeddings for the whole dataset, in MB.",
+  fit: "Time to train the classifier, in seconds.",
+  cpu: "CPU time spent training, in seconds.\nHigher than the training time when several cores work at once.",
+  ram: "Most RAM the training process used, in MB: Python, the loaded embeddings and the classifier together.\n"
+    + "This is how much memory the machine needs to train it.",
+  p50: "Median time for the classifier to score one prompt, in milliseconds.",
+  p99: "99th-percentile time to score one prompt: the slow tail, in milliseconds.",
+  model: "Disk space of the saved classifier, in MB.",
+};
+
+async function loadResources() {
+  try { RES = await fetchJSON("/api/resources"); } catch { RES = null; }
+  renderResources();
+}
+
+$("#rs-pick").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-rows]");
+  if (!b) return;
+  RS.rows = b.dataset.rows;
+  renderResources();
+});
+
+function renderResources() {
+  if (!RES) return;
+  const chip = (val, label, tip) => `<button class="pipe-chip ${RS.rows === val ? "sel" : ""}" data-rows="${val}"
+    aria-pressed="${RS.rows === val}" data-tip="${esc(tip)}">${label}</button>`;
+  $("#rs-rows").innerHTML = chip("best", "best per pipeline × embedding",
+    "The classifier Master results shows for each pipeline × embedding (best normal ROC-AUC).")
+    + chip("all", "every classifier", "All five classifiers for each pipeline × embedding.");
+
+  const picks = masterPicks();
+  let rows = RES.rows.filter((r) => PIPE_FOCUS.has(r.Pipeline));
+  if (RS.rows === "best") rows = rows.filter((r) => picks.has(`${r.Pipeline}|${r.Embeddings}|${r.Classifier}`));
+  const n = (x, d) => (typeof x === "number" ? x.toFixed(d) : "—");
+  const th = (label, tip, cls = "num") => `<th class="${cls}" data-tip="${esc(tip)}">${label}</th>`;
+
+  // group consecutive rows of one pipeline × embedding: they share the embedding cells
+  const groups = [];
+  for (const r of rows) {
+    const g = groups.at(-1);
+    if (g && g.key === `${r.Pipeline}|${r.Embeddings}`) g.rows.push(r);
+    else groups.push({ key: `${r.Pipeline}|${r.Embeddings}`, rows: [r] });
+  }
+  let body = "", lastPipe = null;
+  for (const g of groups) {
+    g.rows.forEach((r, i) => {
+      const cls = [i === 0 && lastPipe && lastPipe !== r.Pipeline ? "pipe-sep" : "",
+                   i === 0 && g.rows.length > 1 ? "grp-top" : "",
+                   RS.rows === "all" && picks.has(`${r.Pipeline}|${r.Embeddings}|${r.Classifier}`) ? "best" : ""]
+        .filter(Boolean).join(" ");
+      const span = g.rows.length > 1 ? ` rowspan="${g.rows.length}"` : "";
+      let emb = "";
+      if (i === 0) {
+        const gpu = !r.emb_local ? `<td class="num muted"${span} colspan="2" data-tip="${esc(RS_TIP.vram)}">n/a — OpenAI's servers</td>`
+          : `<td class="num"${span}>${n(r.vram_mb, 0)}</td><td class="num"${span}>${
+              typeof r.gpu_mean === "number" ? `${r.gpu_mean.toFixed(0)} / ${n(r.gpu_max, 0)}` : "—"}</td>`;
+        emb = `<td${span} data-tip="${esc(pLabel(r.Pipeline))}">${esc(pShort(r.Pipeline))}</td><td${span}>${esc(r.Embeddings)}</td>
+          ${gpu}<td class="num"${span} data-tip="${esc(r.emb_rows ? `${r.emb_rows.toLocaleString()} rows × ${r.emb_dims.toLocaleString()} dimensions` : "")}">${n(r.emb_disk_mb, 1)}</td>`;
+      }
+      body += `<tr${cls ? ` class="${cls}"` : ""}>${emb}
+        <td class="rs-clf">${esc(CLF_SHORT[r.Classifier] || r.Classifier)}</td>
+        <td class="num">${n(r.fit_s, 1)}</td><td class="num">${n(r.cpu_s, 1)}</td><td class="num">${n(r.peak_ram_mb, 0)}</td>
+        <td class="num">${n(r.p50_ms, 2)}</td><td class="num">${n(r.p99_ms, 2)}</td>
+        <td class="num">${n(r.model_mb, 2)}</td></tr>`;
+    });
+    lastPipe = g.rows[0].Pipeline;
+  }
+
+  $("#rs-table").innerHTML = rows.length ? `<tr class="grp"><th colspan="2"></th>
+      <th colspan="3" data-tip="Turning the text into vectors, on the GPU.">Embedding</th>
+      <th colspan="1"></th>
+      <th colspan="3" data-tip="Training the classifier once, on the training rows.">Classifier training</th>
+      <th colspan="2" data-tip="Scoring one prompt with the trained classifier.">Classifier inference</th>
+      <th colspan="1" data-tip="Saved classifier file.">Disk</th></tr>
+    <tr>${th("Pipeline", COL_TIP.Pipeline, "")}${th("Emb", COL_TIP.Emb, "")}
+      ${th("VRAM MB", RS_TIP.vram)}${th("GPU %", RS_TIP.gpu)}${th("disk MB", RS_TIP.embdisk)}
+      ${th("Classifier", `${CLF_ABBR}.`, "")}
+      ${th("fit s", RS_TIP.fit)}${th("CPU s", RS_TIP.cpu)}${th("peak RAM MB", RS_TIP.ram)}
+      ${th("p50 ms", RS_TIP.p50)}${th("p99 ms", RS_TIP.p99)}${th("model MB", RS_TIP.model)}</tr>${body}`
+    : `<tr><td class="muted">Nothing to show for this selection.</td></tr>`;
+
+  const m = RES.machine;
+  const measured = RES.n_embedding || RES.n_classifier;
+  $("#rs-key").innerHTML = measured
+    ? `<span>Measured on ${esc([m?.gpu, m?.cpu, m?.ram_gb ? `${m.ram_gb} GB RAM` : ""].filter(Boolean).join(" · "))}${
+        RES.measured_at ? `, ${esc(RES.measured_at.slice(0, 10))}` : ""}</span>
+       <span>normal mode · classifiers run on the CPU only</span>
+       ${RS.rows === "all" ? `<span><i class="key-edge"></i>blue edge = the classifier Master results shows</span>` : ""}`
+    : `<span>Not measured yet: only the disk sizes are filled in. On the benchmark PC, run
+       <code>venv\\Scripts\\python.exe src\\benchmark_resources.py</code>, then reload.</span>`;
+}
+
+/* ---------- collapsible cards ----------
+   Every Analysis card except Master results folds from its title bar. All runs starts
+   folded; whatever the viewer chooses is remembered in this browser. */
+const FOLD_DEFAULT = { "ablation-card": false, "allrows-card": true, "resources-card": false, "figures-card": false };
+let FOLD = {};
+try { FOLD = JSON.parse(localStorage.getItem("cardFold")) || {}; } catch { FOLD = {}; }
+
+function setCollapsed(card, folded) {
+  if (!card || !(card.id in FOLD_DEFAULT)) return;
+  card.classList.toggle("folded", folded);
+  const h = card.querySelector(":scope > h2");
+  h.setAttribute("aria-expanded", String(!folded));
+  h.querySelector(".fold-pill").textContent = folded ? "Show ▾" : "Hide ▴";
+  FOLD[card.id] = folded;
+  try { localStorage.setItem("cardFold", JSON.stringify(FOLD)); } catch {}
+  updateSecNav();
+}
+
+for (const id of Object.keys(FOLD_DEFAULT)) {
+  const card = document.getElementById(id);
+  const h = card.querySelector(":scope > h2");
+  h.classList.add("fold-bar");
+  h.setAttribute("role", "button");
+  h.tabIndex = 0;
+  h.insertAdjacentHTML("beforeend", `<span class="fold-pill"></span>`);
+  h.addEventListener("click", () => setCollapsed(card, !card.classList.contains("folded")));
+  h.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); h.click(); }
+  });
+  setCollapsed(card, FOLD[id] ?? FOLD_DEFAULT[id]);
 }
 
 /* -------- figures --------

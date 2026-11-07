@@ -38,6 +38,12 @@ def get_master(reference: str = Query(default="normal")):
     return runs.master_table(reference)
 
 
+@app.get("/api/resources")
+def get_resources():
+    """Cost of running the detector on the benchmark PC: GPU, CPU, RAM, time and disk."""
+    return runs.resources()
+
+
 @app.get("/api/figure")
 def get_figure(pipeline: str, mode: str, name: str):
     if pipeline not in runs.PIPELINES or mode not in runs.MODES:

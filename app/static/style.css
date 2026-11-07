@@ -808,3 +808,18 @@ table.heat-t tr:hover td { filter: brightness(1.12); }
   cursor: help; text-decoration: underline dotted rgba(255, 255, 255, 0.28);
   text-underline-offset: 4px;
 }
+
+/* collapsible cards: the title bar is the button */
+h2.fold-bar { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
+  margin: -14px -16px 10px; padding: 14px 16px; border-radius: 10px; }
+h2.fold-bar:hover { background: rgba(255, 255, 255, 0.03); }
+h2.fold-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.fold-pill { margin-left: auto; font-size: 12px; font-weight: 600; letter-spacing: 0; text-transform: none;
+  color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 3px 12px; white-space: nowrap; }
+.card.folded > :not(h2) { display: none !important; }
+.card.folded > h2.fold-bar { margin-bottom: -14px; }
+
+/* resources: shared embedding cells span their classifier rows */
+#rs-table td[rowspan] { vertical-align: top; }
+#rs-table tr.grp-top td { border-top: 1px solid var(--border-strong); }
+#rs-table td.rs-clf { border-left: 1px solid var(--border); }

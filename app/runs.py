@@ -116,7 +116,7 @@ def all_results() -> list[dict]:
 # ---------------- master table: one row per (pipeline, embedding, classifier) ----------------
 
 MASTER_QUALITY = ["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC", "PR-AUC"]
-MASTER_EXTRA = ["FPR", "FNR", "TN", "FP", "FN", "TP", "Test-Samples",
+MASTER_EXTRA = ["FPR", "TN", "FP", "FN", "TP", "Test-Samples",
                 "TPR@1%FPR", "FPR@1%FPR", "TPR@0.1%FPR", "FPR@0.1%FPR",
                 "Latency-P50(ms)", "Latency-P99(ms)", "Train-Time(s)", "Train-PeakRSS(MB)",
                 "Inference-Time-per-Sample(ms)"]
@@ -183,6 +183,58 @@ def master_table(reference: str = "normal") -> dict:
                      f"and are omitted; switch the reference mode to see them.")
     return {"rows": rows, "reference": reference, "variants": variants,
             "metrics": MASTER_QUALITY, "notes": notes}
+
+
+# ---------------- resources: what running the detector costs ----------------
+# Measured on one benchmark PC by src/benchmark_resources.py (fresh process per measurement);
+# disk sizes are read off the files themselves.
+
+BENCH_FILE = "resource_benchmark.json"
+EMB_LOCAL = {"minilm", "qwen3"}   # run on the GPU; openai runs on OpenAI's servers
+
+
+def _mb(p: Path) -> float | None:
+    return round(p.stat().st_size / 1e6, 3) if p.is_file() else None
+
+
+def resources() -> dict:
+    """One row per pipeline x embedding x classifier (normal mode), embedding columns repeated per row."""
+    try:
+        bench = json.loads((paths.RUNS_DIR / BENCH_FILE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        bench = {}
+    emb_b, clf_b = bench.get("embedding", {}), bench.get("classifier", {})
+
+    configs = {(r["Pipeline"], str(r["Embeddings"]).lower(), r["Classifier"])
+               for r in all_results() if r["Mode"] == "normal"}
+    configs |= {tuple(k.split("|")) for k in clf_b if k.count("|") == 2}
+    rows = []
+    for pipeline, emb, clf in configs:
+        if pipeline not in PIPELINES:
+            continue
+        ef = run_dir(pipeline, "normal") / "embeddings" / f"{emb}_prompt.npy"
+        try:
+            n_rows, dims = np.load(ef, mmap_mode="r").shape[:2]
+        except (OSError, ValueError):
+            n_rows, dims = None, None
+        e = emb_b.get(f"{pipeline}|{emb}") or {}
+        c = clf_b.get(f"{pipeline}|{emb}|{clf}") or {}
+        rows.append({
+            "Pipeline": pipeline, "Embeddings": emb.upper(), "Classifier": clf,
+            "emb_local": emb in EMB_LOCAL,
+            "vram_mb": _finite(e.get("vram_peak_mb")),
+            "gpu_mean": _finite(e.get("gpu_util_mean")), "gpu_max": _finite(e.get("gpu_util_max")),
+            "emb_disk_mb": _mb(ef), "emb_rows": n_rows, "emb_dims": dims,
+            "fit_s": _finite(c.get("fit_s")), "cpu_s": _finite(c.get("cpu_s")),
+            "peak_ram_mb": _finite(c.get("peak_ram_mb")),
+            "p50_ms": _finite(c.get("p50_ms")), "p99_ms": _finite(c.get("p99_ms")),
+            "model_mb": _finite(c.get("model_mb")),
+        })
+    rows.sort(key=lambda r: (list(PIPELINES).index(r["Pipeline"]), r["Embeddings"], r["Classifier"]))
+    stamps = [v.get("measured_at") for v in (*emb_b.values(), *clf_b.values()) if v.get("measured_at")]
+    return {"rows": rows, "machine": bench.get("machine"),
+            "measured_at": max(stamps) if stamps else None,
+            "n_embedding": len(emb_b), "n_classifier": len(clf_b), "bench_file": BENCH_FILE}
 
 
 def sample_rows(pipeline: str, n: int = 1) -> list[dict]:
