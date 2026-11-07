@@ -3,12 +3,13 @@
 Measures, for the normal-mode runs of each pipeline:
   embedding stage  (local models only)  peak VRAM and GPU utilisation while embedding a
                                         sample of prompts on the GPU
-  classifier stage (every embedding)    training time, CPU time, peak RAM, single-prompt
+  classifier stage (every embedding)    training time, CPU time, fit RAM, single-prompt
                                         latency and the saved model's size
 
-Every measurement runs in a fresh subprocess, so "peak RAM" is the true peak of a process
-that loads the embeddings and trains that one classifier (Windows cannot reset a running
-process's peak, so measuring several classifiers in one process would mix them up).
+The training run (train_evaluate_visualize.py) and generate_embeddings.py measure the same
+things as they go; this re-measures them on their own, one fresh subprocess per measurement,
+with nothing else running. Time, CPU and fit RAM use the training run's own meter, so the two
+sources mean the same thing; the dashboard shows whichever is newer.
 
 Results merge into <runs>/resource_benchmark.json; re-running one part keeps the rest.
 
@@ -34,6 +35,7 @@ SRC_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SRC_DIR.parent
 sys.path.insert(0, str(ROOT_DIR))
 from pipeline_paths import DATA_DIR, DATASETS, RUNS_DIR  # noqa: E402
+import progress  # noqa: E402  (src/progress.py: the marker lines the dashboard's bars read)
 
 OUT_FILE = RUNS_DIR / "resource_benchmark.json"
 LOCAL_MODELS = ("minilm", "qwen3")      # run on this machine's GPU; openai runs on OpenAI's servers
@@ -156,14 +158,8 @@ def worker_classify(emb_file: Path, split_file: Path, clf_name: str, out_file: P
         dual = len({row.tobytes() for row in X_fit}) < X_fit.shape[1]
         clf.set_params(calibratedclassifiercv__estimator__dual=dual)
 
-    proc = psutil.Process()
-    ram_before_fit = proc.memory_info().rss / 1e6
-    ct0 = proc.cpu_times()
-    t0 = time.perf_counter()
-    clf.fit(X_fit, y[fit_idx])
-    fit_s = time.perf_counter() - t0
-    ct1 = proc.cpu_times()
-    peak = _peak_rss_mb()
+    with tev._ResourceMeter() as fit:   # the training run's meter: helper processes included
+        clf.fit(X_fit, y[fit_idx])
 
     lat = tev.measure_latency(clf, X_test)
     with tempfile.TemporaryDirectory() as d:
@@ -171,10 +167,10 @@ def worker_classify(emb_file: Path, split_file: Path, clf_name: str, out_file: P
         joblib.dump(clf, p)
         model_mb = p.stat().st_size / 1e6
 
-    out = {"fit_s": fit_s,
-           "cpu_s": (ct1.user + ct1.system) - (ct0.user + ct0.system),
-           "peak_ram_mb": peak,
-           "ram_before_fit_mb": ram_before_fit,
+    out = {"fit_s": fit.wall_seconds,
+           "cpu_s": fit.cpu_seconds,
+           "ram_mb": fit.ram_mb,
+           "process_peak_ram_mb": _peak_rss_mb(),
            "p50_ms": lat.get("Latency-P50(ms)"),
            "p99_ms": lat.get("Latency-P99(ms)"),
            "model_mb": model_mb,
@@ -250,6 +246,7 @@ def main() -> int:
     data["machine"] = machine
 
     cuda = "gpu" in machine
+    failed = 0
     if "embed" in stages and any(m in LOCAL_MODELS for m in models) and not cuda:
         print("\nNo CUDA GPU visible to PyTorch, so the GPU numbers are skipped.\n"
               "Install the CUDA build of torch (README, step 2, 'NVIDIA GPUs only') and run again.")
@@ -277,12 +274,14 @@ def main() -> int:
                     if m not in LOCAL_MODELS:
                         continue
                     print(f"  embed, {m} ({len(texts)} prompts)")
+                    progress.mark("gpu", m)
                     res = _run_worker(["--_worker", "embed", "--_a", m, "--_b", str(tf)])
+                    failed += res is None
                     if res:
                         data["embedding"][f"{pipe}|{m}"] = {**res, "measured_at": stamp, "machine": machine}
                         _save(data)
                         print(f"    VRAM {res['vram_peak_mb']:.0f} MB, GPU "
-                              f"{res['gpu_util_mean'] if res['gpu_util_mean'] is not None else '?'}% avg")
+                              f"{f'{res['gpu_util_mean']:.0f}' if res['gpu_util_mean'] is not None else '?'}% avg")
 
             if "classify" in stages:
                 y = df["label"].values
@@ -298,18 +297,22 @@ def main() -> int:
                     if np.load(ef, mmap_mode="r").shape[0] != len(y):
                         print(f"  classify, {m}: {ef.name} has a different row count than the dataset - skipped")
                         continue
-                    for clf in classifiers:
+                    for i, clf in enumerate(classifiers):
                         print(f"  classify, {m}, {clf}")
+                        progress.mark("classify", f"{m} · {clf}", i, len(classifiers))
                         res = _run_worker(["--_worker", "classify", "--_a", str(ef), "--_b", str(sf), "--_c", clf])
+                        failed += res is None
                         if res:
                             data["classifier"][f"{pipe}|{m}|{clf}"] = {**res, "measured_at": stamp,
                                                                        "machine": machine}
                             _save(data)
-                            print(f"    fit {res['fit_s']:.1f}s, peak RAM {res['peak_ram_mb']:.0f} MB, "
-                                  f"p50 {res['p50_ms']:.2f} ms")
+                            print(f"    fit {res['fit_s']:.1f}s, CPU {res['cpu_s']:.1f}s, "
+                                  f"fit RAM {res['ram_mb']:.0f} MB, p50 {res['p50_ms']:.2f} ms")
 
     print(f"\nSaved to {OUT_FILE}")
-    return 0
+    if failed:
+        print(f"{failed} measurement(s) failed, see above")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

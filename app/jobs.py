@@ -200,6 +200,22 @@ def _run_cmds(py: str, params: dict, runs: list[tuple[str, str]], data_later: bo
     return [c for pair in zip(embeds, trains) for c in pair]
 
 
+def _resource_cmds(py: str, params: dict) -> list[Cmd]:
+    """One benchmark_resources.py call per pipeline whose dataset is on disk; results merge into one file."""
+    stages = str(params.get("stages") or "embed,classify")
+    if not set(stages.split(",")) <= {"embed", "classify"}:
+        raise ValidationError(f"unknown stages: {stages}")
+    extra = ["--stages", stages]
+    if params.get("models"):
+        extra += ["--models", str(params["models"])]
+    cmds = [Cmd([py, "-u", str(SRC_DIR / "benchmark_resources.py"), "--pipelines", p, *extra],
+                f"{p} — benchmark_resources", run=f"{p} / resources")
+            for p in PIPELINES if data_path(p).is_file()]
+    if not cmds:
+        raise ValidationError("no dataset on disk to measure - build/download them first")
+    return cmds
+
+
 def build_cmds(stage: str, params: dict) -> list[Cmd]:
     py = sys.executable
 
@@ -225,6 +241,9 @@ def build_cmds(stage: str, params: dict) -> list[Cmd]:
         if mode not in MODES:
             raise ValidationError(f"unknown mode: {mode}")
         cmds = _run_cmds(py, params, [(pipeline, mode)])
+
+    elif stage == "resources":
+        cmds = _resource_cmds(py, params)
 
     else:
         raise ValidationError(f"unknown stage: {stage}")

@@ -1,17 +1,13 @@
 import argparse
 import faulthandler
 import json
+import os
 import platform
+import subprocess
 import sys
 import time
 import warnings
 from pathlib import Path
-
-try:                      # Unix only; gives the kernel's peak-RSS high-water mark
-    import resource
-    _HAS_RESOURCE = True
-except ImportError:
-    _HAS_RESOURCE = False
 
 import joblib
 import matplotlib
@@ -63,38 +59,126 @@ plt.style.use('seaborn-v0_8-whitegrid')
 sns.set_palette("husl")
 
 
-def _peak_rss_bytes() -> float:
-    """Process peak RSS as the OS tracks it (getrusage on Unix, psutil peak_wset on Windows)."""
-    if _HAS_RESOURCE:
-        ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        return float(ru if sys.platform == "darwin" else ru * 1024)
-    info = psutil.Process().memory_info()
-    return float(getattr(info, "peak_wset", info.rss))
+# Polls the training process's RSS from a helper process, so every block gets its own peak: the OS
+# peak never resets on Windows (later classifiers read 0), and a sampler thread in here caused SIGSEGV.
+# The RSS includes the training process's own child processes (the SVM's calibration folds run in
+# joblib workers), not the watcher itself. One stdin line per request: "reset" starts a block at the
+# current RSS, anything else returns the block's peak.
+_RAM_WATCH_CODE = r"""
+import os, sys, threading, time, psutil
+p, me, lock = psutil.Process(int(sys.argv[1])), os.getpid(), threading.Lock()
+peak, kids, scanned = 0, [], 0.0
+def total(rescan=False):
+    global kids, scanned
+    if rescan or time.monotonic() - scanned > 0.25:   # listing processes is slow; RSS reads are not
+        kids = [k for k in p.children(recursive=True) if k.pid != me]
+        scanned = time.monotonic()
+    t = p.memory_info().rss
+    for k in kids:
+        try:
+            t += k.memory_info().rss
+        except psutil.Error:
+            pass
+    return t
+def poll():
+    global peak
+    while True:
+        with lock:
+            try:
+                peak = max(peak, total())
+            except psutil.Error:
+                return
+        time.sleep(0.01)
+threading.Thread(target=poll, daemon=True).start()
+for line in sys.stdin:
+    with lock:
+        rss = total(rescan=True)
+        peak = rss if line.strip() == "reset" else max(peak, rss)
+        print(peak, flush=True)
+"""
+
+
+def _stop_joblib_workers() -> None:
+    """End the worker processes an earlier block's joblib left running, so the next block counts its own."""
+    try:
+        from joblib.externals.loky import reusable_executor
+        if reusable_executor._executor is not None:
+            reusable_executor._executor.shutdown(wait=True)
+    except Exception:
+        pass
+
+
+def _cpu_seconds(proc: psutil.Process, skip: int | None) -> dict[int, float]:
+    """CPU-seconds so far of proc and each of its child processes (but not the RAM watcher), by pid."""
+    out = {}
+    for q in [proc, *proc.children(recursive=True)]:
+        if q.pid == skip:
+            continue
+        try:
+            ct = q.cpu_times()
+            out[q.pid] = ct.user + ct.system
+        except psutil.Error:
+            pass
+    return out
+
+
+class _RamWatcher:
+    def __init__(self):
+        # exits by itself when this process ends: its stdin closes
+        self._p = subprocess.Popen([sys.executable, "-c", _RAM_WATCH_CODE, str(os.getpid())],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+    def ask(self, cmd: str) -> float:
+        self._p.stdin.write(cmd + "\n")
+        self._p.stdin.flush()
+        return float(self._p.stdout.readline())   # "" (watcher gone) raises ValueError
+
+
+_WATCHER: list = []   # started on first use; [None] once it failed to start
+
+
+def _ram_watcher() -> _RamWatcher | None:
+    if not _WATCHER:
+        try:
+            _WATCHER.append(_RamWatcher())
+        except OSError as e:
+            print(f"      RAM not measured: {e}")
+            _WATCHER.append(None)
+    return _WATCHER[0]
 
 
 class _ResourceMeter:
-    """Wall time, CPU-seconds and peak-RSS growth over a block; no sampler thread (it caused SIGSEGV)."""
+    """Wall time, CPU-seconds and the most RAM a block added on top of what was in use when it started;
+    CPU and RAM include the child processes the block ran its work in."""
 
     def __init__(self):
         self._proc = psutil.Process()
         self.wall_seconds = 0.0
         self.cpu_seconds = float("nan")
-        self.peak_rss_mb = float("nan")
+        self.ram_mb = float("nan")
 
     def __enter__(self):
-        self._base_peak_rss = _peak_rss_bytes()
-        ct = self._proc.cpu_times()
-        self._cpu0 = ct.user + ct.system
+        _stop_joblib_workers()
+        self._watch = _ram_watcher()
+        try:
+            self._rss0 = self._watch.ask("reset") if self._watch else None
+        except (OSError, ValueError):
+            self._watch = None
+        self._skip = self._watch._p.pid if self._watch else None
+        self._cpu0 = _cpu_seconds(self._proc, self._skip)
         self._t0 = time.perf_counter()
         return self
 
     def __exit__(self, *exc):
         self.wall_seconds = time.perf_counter() - self._t0
-        ct = self._proc.cpu_times()
-        self.cpu_seconds = (ct.user + ct.system) - self._cpu0
-        peak = _peak_rss_bytes()
-        if np.isfinite(peak) and np.isfinite(self._base_peak_rss):
-            self.peak_rss_mb = max(0.0, (peak - self._base_peak_rss) / 1e6)
+        cpu = _cpu_seconds(self._proc, self._skip)
+        # workers still alive at the end; the joblib workers stay up until the next block stops them
+        self.cpu_seconds = sum(t - self._cpu0.get(pid, 0.0) for pid, t in cpu.items())
+        if self._watch:
+            try:
+                self.ram_mb = max(0.0, self._watch.ask("peak") - self._rss0) / 1e6
+            except (OSError, ValueError):
+                pass
         return False
 
 
@@ -141,11 +225,23 @@ def _json_safe(obj):
     raise TypeError(f"{type(obj).__name__} is not JSON serialisable")
 
 
+def _cpu_name() -> str:
+    if sys.platform == "win32":
+        try:   # platform.processor() is only a family code on Windows
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+            return winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
+        except OSError:
+            pass
+    return platform.processor() or platform.machine()
+
+
 def environment_report() -> dict:
     """Machine facts the cost columns only mean something against."""
     return {
         'platform': platform.platform(),
         'processor': platform.processor(),
+        'cpu': _cpu_name(),
         'python': platform.python_version(),
         'cpu_count_logical': psutil.cpu_count(logical=True),
         'cpu_count_physical': psutil.cpu_count(logical=False),
@@ -269,10 +365,10 @@ def train_evaluate(X_train, y_train, X_test, y_test, classifier, name):
     metrics.update({
         'Train-Time(s)': fit_res.wall_seconds,
         'Train-CPU(s)': fit_res.cpu_seconds,
-        'Train-PeakRSS(MB)': fit_res.peak_rss_mb,
+        'Train-RAM(MB)': fit_res.ram_mb,
         'Inference-Time-Total(s)': infer_res.wall_seconds,
         'Inference-CPU(s)': infer_res.cpu_seconds,
-        'Inference-PeakRSS(MB)': infer_res.peak_rss_mb,
+        'Inference-RAM(MB)': infer_res.ram_mb,
         'Test-Samples': len(X_test),
     })
     metrics.update(measure_latency(classifier, X_test))

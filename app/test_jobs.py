@@ -1,12 +1,15 @@
 """Job runner tests: marker parsing, job commands, settings. Run: python -m app.test_jobs (or pytest)"""
 
+import json
 import os
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-from app import jobs, paths, settings, vast
+import numpy as np
+
+from app import jobs, paths, runs, settings, vast
 from app.jobs import VAST_STOP, Cmd, Job, build_cmds, job_env
 
 
@@ -87,6 +90,72 @@ def test_full_builds_only_missing_datasets():
         rebuilt = build_cmds("full", {"models": "minilm", "rebuild_data": True, "skip_done": True})
         # new datasets make cached embeddings stale, so a rebuild always re-embeds
         assert len(rebuilt) == 20 and all("--force" in c.argv for c in rebuilt if _script(c) == "generate_embeddings.py")
+    finally:
+        jobs.data_path = real
+
+
+def test_resources_read_from_the_runs():
+    real = paths.RUNS_DIR
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            paths.RUNS_DIR = Path(d)
+            run = Path(d) / "pipeline1_alamsabi" / "normal"
+            for sub in ("results", "embeddings", "models"):
+                (run / sub).mkdir(parents=True)
+            (run / "results" / "full_evaluation_results.csv").write_text(
+                "Embeddings,Classifier,Train-Time(s),Train-CPU(s),Train-RAM(MB),Latency-P50(ms),Latency-P99(ms)\n"
+                "MINILM,SVM,12.5,3.0,210.0,0.7,1.1\n"
+                "OPENAI,SVM,15.0,4.0,,0.8,1.2\n", encoding="utf-8")
+            (run / "results" / "run_meta.json").write_text(json.dumps(
+                {"environment": {"cpu": "Test CPU", "total_ram_gb": 64}, "finished_at": "2026-11-07T23:00:00"}))
+            np.save(run / "embeddings" / "minilm_prompt.npy", np.zeros((10, 4), np.float32))
+            (run / "embeddings" / "minilm_gpu.json").write_text(json.dumps(
+                {"device": "Test GPU", "vram_peak_mb": 1017.0, "gpu_util_mean": 47.8, "gpu_util_max": 99.0}))
+            (run / "models" / "minilm_SVM.joblib").write_bytes(b"x" * 2_000_000)
+
+            res = runs.resources()
+            mini, oai = res["rows"]
+            assert (mini["fit_s"], mini["cpu_s"], mini["ram_mb"], mini["p99_ms"]) == (12.5, 3.0, 210.0, 1.1)
+            assert (mini["vram_mb"], mini["gpu_mean"], mini["model_mb"], mini["emb_rows"]) == (1017.0, 47.8, 2.0, 10)
+            assert oai["ram_mb"] is None and oai["vram_mb"] is None and oai["model_mb"] is None
+            assert res["machine"] == {"cpu": "Test CPU", "ram_gb": 64, "gpu": "Test GPU"}
+            assert (res["n_embedding"], res["n_classifier"], res["n_benchmark"]) == (1, 2, 0)
+
+            # Measure resources ran later: its numbers win, and its blanks are filled from the run
+            (Path(d) / runs.BENCH_FILE).write_text(json.dumps({"classifier": {
+                "pipeline1_alamsabi|minilm|SVM": {"fit_s": 9.0, "cpu_s": 8.0, "measured_at": "2026-11-08T01:00:00"},
+                "pipeline1_alamsabi|openai|SVM": {"fit_s": 1.0, "ram_mb": 99.0, "measured_at": "2026-11-01T00:00:00"},
+            }}))
+            mini, oai = runs.resources()["rows"]
+            assert (mini["fit_s"], mini["cpu_s"], mini["ram_mb"], mini["clf_src"]) == (9.0, 8.0, 210.0, "benchmark")
+            # an older benchmark loses to the run, but still fills what the run lacks
+            assert (oai["fit_s"], oai["ram_mb"], oai["clf_src"]) == (15.0, 99.0, "run")
+        finally:
+            paths.RUNS_DIR = real
+
+
+def test_resources_one_step_per_dataset_on_disk():
+    real = jobs.data_path
+    try:
+        jobs.data_path = lambda p: Path(__file__) if p != "pipeline2_organic_bipia" else Path("/nope")
+        cmds = build_cmds("resources", {"models": "minilm,qwen3", "stages": "classify"})
+        assert [c.argv[c.argv.index("--pipelines") + 1] for c in cmds] == \
+            ["pipeline1_alamsabi", "pipeline3_organic_injected"]
+        assert all(_script(c) == "benchmark_resources.py" and c.run for c in cmds)
+        assert all(c.argv[-4:] == ["--stages", "classify", "--models", "minilm,qwen3"] for c in cmds)
+        for bad in ({"stages": "embed,nope"},):
+            try:
+                build_cmds("resources", bad)
+            except jobs.ValidationError:
+                continue
+            raise AssertionError(f"accepted {bad}")
+        jobs.data_path = lambda p: Path("/nope")
+        try:
+            build_cmds("resources", {})
+        except jobs.ValidationError:
+            pass
+        else:
+            raise AssertionError("queued a benchmark with no dataset on disk")
     finally:
         jobs.data_path = real
 

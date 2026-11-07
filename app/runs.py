@@ -118,7 +118,7 @@ def all_results() -> list[dict]:
 MASTER_QUALITY = ["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC", "PR-AUC"]
 MASTER_EXTRA = ["FPR", "TN", "FP", "FN", "TP", "Test-Samples",
                 "TPR@1%FPR", "FPR@1%FPR", "TPR@0.1%FPR", "FPR@0.1%FPR",
-                "Latency-P50(ms)", "Latency-P99(ms)", "Train-Time(s)", "Train-PeakRSS(MB)",
+                "Latency-P50(ms)", "Latency-P99(ms)", "Train-Time(s)", "Train-RAM(MB)",
                 "Inference-Time-per-Sample(ms)"]
 
 
@@ -186,55 +186,99 @@ def master_table(reference: str = "normal") -> dict:
 
 
 # ---------------- resources: what running the detector costs ----------------
-# Measured on one benchmark PC by src/benchmark_resources.py (fresh process per measurement);
-# disk sizes are read off the files themselves.
+# Two sources measure the same things. The normal-mode runs, as they go: the training run's cost columns
+# and what generate_embeddings.py logged while embedding ({emb}_gpu.json, only when it embedded on a local
+# CUDA GPU). And Run -> Measure resources (src/benchmark_resources.py -> BENCH_FILE), which re-measures
+# them on their own. Per row the newer one is shown, with any blank filled from the other.
 
 BENCH_FILE = "resource_benchmark.json"
 EMB_LOCAL = {"minilm", "qwen3"}   # run on the GPU; openai runs on OpenAI's servers
+CLF_COST = ("fit_s", "cpu_s", "ram_mb", "p50_ms", "p99_ms", "model_mb")
+GPU_COST = ("vram_peak_mb", "gpu_util_mean", "gpu_util_max")
 
 
 def _mb(p: Path) -> float | None:
     return round(p.stat().st_size / 1e6, 3) if p.is_file() else None
 
 
+def _read_json(p: Path) -> dict:
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _newer(run: dict, bench: dict, keys: tuple) -> tuple[dict, str | None, str | None]:
+    """keys from the more recently measured source (run or benchmark), blanks filled from the other;
+    both carry their time as "at". Returns (values, which source won, its time)."""
+    srcs = [("run", run), ("benchmark", bench)]
+    has = [(name, s) for name, s in srcs if any(_finite(s.get(k)) is not None for k in keys)]
+    if not has:
+        return {k: None for k in keys}, None, None
+    has.sort(key=lambda ns: ns[1].get("at") or "", reverse=True)   # newest first
+    out = {}
+    for k in keys:
+        out[k] = next((v for _, s in has if (v := _finite(s.get(k))) is not None), None)
+    return out, has[0][0], has[0][1].get("at")
+
+
 def resources() -> dict:
     """One row per pipeline x embedding x classifier (normal mode), embedding columns repeated per row."""
-    try:
-        bench = json.loads((paths.RUNS_DIR / BENCH_FILE).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        bench = {}
+    bench = _read_json(paths.RUNS_DIR / BENCH_FILE)
     emb_b, clf_b = bench.get("embedding", {}), bench.get("classifier", {})
-
-    configs = {(r["Pipeline"], str(r["Embeddings"]).lower(), r["Classifier"])
-               for r in all_results() if r["Mode"] == "normal"}
-    configs |= {tuple(k.split("|")) for k in clf_b if k.count("|") == 2}
-    rows = []
-    for pipeline, emb, clf in configs:
-        if pipeline not in PIPELINES:
+    rows, emb_info, metas, stamps = [], {}, {}, []
+    for r in all_results():
+        pipeline, emb, clf = r["Pipeline"], str(r["Embeddings"]).lower(), r["Classifier"]
+        if r["Mode"] != "normal" or pipeline not in PIPELINES:
             continue
-        ef = run_dir(pipeline, "normal") / "embeddings" / f"{emb}_prompt.npy"
-        try:
-            n_rows, dims = np.load(ef, mmap_mode="r").shape[:2]
-        except (OSError, ValueError):
-            n_rows, dims = None, None
-        e = emb_b.get(f"{pipeline}|{emb}") or {}
+        d = run_dir(pipeline, "normal")
+        if pipeline not in metas:
+            metas[pipeline] = _read_json(d / "results" / "run_meta.json")
+        if (pipeline, emb) not in emb_info:
+            ef = d / "embeddings" / f"{emb}_prompt.npy"
+            try:
+                shape = np.load(ef, mmap_mode="r").shape[:2]
+            except (OSError, ValueError):
+                shape = (None, None)
+            g = _read_json(d / "embeddings" / f"{emb}_gpu.json")
+            e = emb_b.get(f"{pipeline}|{emb}") or {}
+            gpu, gpu_src, gpu_at = _newer({**g, "at": g.get("measured_at")}, {**e, "at": e.get("measured_at")},
+                                          GPU_COST)
+            if gpu_at:
+                stamps.append(gpu_at)
+            emb_info[pipeline, emb] = (ef, shape, gpu, gpu_src,
+                                       (g if gpu_src == "run" else e).get("device"))
+        ef, (n_rows, dims), gpu, gpu_src, _ = emb_info[pipeline, emb]
+
         c = clf_b.get(f"{pipeline}|{emb}|{clf}") or {}
+        run_cost = {"fit_s": r.get("Train-Time(s)"), "cpu_s": r.get("Train-CPU(s)"),
+                    "ram_mb": r.get("Train-RAM(MB)"),   # older runs have no such column
+                    "p50_ms": r.get("Latency-P50(ms)"), "p99_ms": r.get("Latency-P99(ms)"),
+                    "model_mb": _mb(d / "models" / f"{emb}_{clf}.joblib"),
+                    "at": metas[pipeline].get("finished_at")}
+        # older benchmark entries have only peak_ram_mb, a whole-process peak: not the same thing, left out
+        cost, clf_src, clf_at = _newer(run_cost, {**c, "at": c.get("measured_at")}, CLF_COST)
+        if clf_at:
+            stamps.append(clf_at)
         rows.append({
             "Pipeline": pipeline, "Embeddings": emb.upper(), "Classifier": clf,
             "emb_local": emb in EMB_LOCAL,
-            "vram_mb": _finite(e.get("vram_peak_mb")),
-            "gpu_mean": _finite(e.get("gpu_util_mean")), "gpu_max": _finite(e.get("gpu_util_max")),
+            "vram_mb": gpu["vram_peak_mb"], "gpu_mean": gpu["gpu_util_mean"], "gpu_max": gpu["gpu_util_max"],
+            "gpu_src": gpu_src,
             "emb_disk_mb": _mb(ef), "emb_rows": n_rows, "emb_dims": dims,
-            "fit_s": _finite(c.get("fit_s")), "cpu_s": _finite(c.get("cpu_s")),
-            "peak_ram_mb": _finite(c.get("peak_ram_mb")),
-            "p50_ms": _finite(c.get("p50_ms")), "p99_ms": _finite(c.get("p99_ms")),
-            "model_mb": _finite(c.get("model_mb")),
+            **cost, "clf_src": clf_src,
         })
     rows.sort(key=lambda r: (list(PIPELINES).index(r["Pipeline"]), r["Embeddings"], r["Classifier"]))
-    stamps = [v.get("measured_at") for v in (*emb_b.values(), *clf_b.values()) if v.get("measured_at")]
-    return {"rows": rows, "machine": bench.get("machine"),
-            "measured_at": max(stamps) if stamps else None,
-            "n_embedding": len(emb_b), "n_classifier": len(clf_b), "bench_file": BENCH_FILE}
+
+    env = next((m["environment"] for m in metas.values() if m.get("environment")), {})
+    bm = bench.get("machine") or {}
+    machine = {"cpu": bm.get("cpu") or env.get("cpu") or env.get("processor"),
+               "ram_gb": env.get("total_ram_gb") or bm.get("ram_gb"),
+               "gpu": next((dev for *_, dev in emb_info.values() if dev), None) or bm.get("gpu")}
+    return {"rows": rows, "machine": machine, "measured_at": max(stamps) if stamps else None,
+            "n_embedding": sum(v[3] is not None for v in emb_info.values()),
+            "n_classifier": sum(r["clf_src"] is not None for r in rows),
+            "n_benchmark": sum(r["clf_src"] == "benchmark" for r in rows), "bench_file": BENCH_FILE}
 
 
 def sample_rows(pipeline: str, n: int = 1) -> list[dict]:

@@ -57,6 +57,9 @@
         <button class="choice" id="b-advanced">
           <b>Advanced</b>
           <small>Choose exactly which runs to do.</small></button>
+        <button class="choice" id="b-resources">
+          <b>Measure resources</b>
+          <small>Re-measure GPU, CPU, RAM and latency on this PC, without retraining the runs.</small></button>
       </div>
       <div class="step-nav one">
         <button class="linkback" data-back="0">Back</button>
@@ -131,6 +134,28 @@
       <div class="step-nav">
         <button class="linkback" data-back="1">Back</button>
         <button class="btn primary" id="b-confirm-full">Start full pipeline</button>
+      </div>
+    </div>
+
+    <div class="step" data-step="5" hidden>
+      <h3 class="wiz-title">Measure resources</h3>
+      <p class="wiz-sub">The runs already measure these as they go. This re-measures them on their own, one
+        classifier at a time, for the normal-mode runs on disk; the Resources table shows the newer numbers.
+        Close other GPU programs first: GPU % is read for the whole card.</p>
+      <div class="adv-body">
+        <div class="checks emb-picker">
+          <label class="chip-toggle"><input type="checkbox" class="rs-model" value="minilm" checked><span>minilm</span></label>
+          <label class="chip-toggle"><input type="checkbox" class="rs-model" value="openai" checked><span>openai</span></label>
+          <label class="chip-toggle"><input type="checkbox" class="rs-model" value="qwen3" checked><span>qwen3</span></label>
+        </div>
+        <div class="checks">
+          <label class="chip-toggle" title="Peak VRAM and GPU % while embedding 1,000 sample prompts (minilm and qwen3; needs an NVIDIA GPU)"><input type="checkbox" class="rs-stage" value="embed" checked><span>GPU embedding</span></label>
+          <label class="chip-toggle" title="Training time, CPU time, fit RAM, latency and model size for every classifier, using the stored embeddings"><input type="checkbox" class="rs-stage" value="classify" checked><span>classifiers</span></label>
+        </div>
+      </div>
+      <div class="step-nav">
+        <button class="linkback" data-back="1">Back</button>
+        <button class="btn primary" id="b-confirm-resources">Start measuring</button>
       </div>
     </div>
 

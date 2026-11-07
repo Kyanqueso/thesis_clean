@@ -1,7 +1,10 @@
 import argparse
+import contextlib
+import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -104,7 +107,49 @@ def _embed_batch(batch: list[str], model_id: str, attempts: int = 6):
             time.sleep(wait)
 
 
-def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_type: str, dtype: str = None, max_seq_length: int = None, item: str = "") -> np.ndarray:
+class _GpuUse:
+    """Peak VRAM and whole-card GPU utilisation over a block; utilisation needs nvidia-ml-py."""
+
+    POLL_S = 0.05
+
+    def __enter__(self):
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        self.util, self._stop, self._thread = [], threading.Event(), None
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            self._thread = threading.Thread(target=self._poll, args=(pynvml, handle), daemon=True)
+            self._thread.start()
+        except Exception as e:   # no NVML: VRAM is still measured
+            print(f"    GPU utilisation not measured ({type(e).__name__}: {e})")
+        self._t0 = time.perf_counter()
+        return self
+
+    def _poll(self, nvml, handle):
+        while not self._stop.is_set():
+            self.util.append(nvml.nvmlDeviceGetUtilizationRates(handle).gpu)
+            time.sleep(self.POLL_S)
+
+    def __exit__(self, *exc):
+        torch.cuda.synchronize()
+        self._stop.set()
+        if self._thread:
+            self._thread.join()
+        self.result = {
+            "device": torch.cuda.get_device_name(0),
+            "embed_s": time.perf_counter() - self._t0,
+            "vram_peak_mb": torch.cuda.max_memory_reserved() / 1e6,
+            "vram_alloc_peak_mb": torch.cuda.max_memory_allocated() / 1e6,
+            "gpu_util_mean": float(np.mean(self.util)) if self.util else None,
+            "gpu_util_max": float(np.max(self.util)) if self.util else None,
+        }
+        return False
+
+
+def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_type: str, dtype: str = None, max_seq_length: int = None, item: str = "", gpu_use: dict | None = None) -> np.ndarray:
+    """gpu_use, when given, is filled with what embedding on a CUDA GPU cost (left empty otherwise)."""
 
     if embed_type == 'sbert':
         progress.mark("load", item)
@@ -113,12 +158,17 @@ def generate_embeddings(texts: list[str], model_id: str, batch_size: int, embed_
         if max_seq_length:
             model.max_seq_length = max_seq_length
         progress.mark("embed", item)   # no total: the dashboard shows it as "working"
-        return model.encode(
-            texts,
-            batch_size=batch_size,
-            show_progress_bar=True,
-            normalize_embeddings=False
-        )
+        meter = _GpuUse() if model.device.type == "cuda" else contextlib.nullcontext()
+        with meter:
+            out = model.encode(
+                texts,
+                batch_size=batch_size,
+                show_progress_bar=True,
+                normalize_embeddings=False
+            )
+        if gpu_use is not None and isinstance(meter, _GpuUse):
+            gpu_use.update(meter.result, n_texts=len(texts), batch_size=batch_size)
+        return out
 
     if embed_type == 'openai':
         if not OPENAI_ENABLED:
@@ -225,6 +275,8 @@ def main():
                 print(f"\n--- {key.upper()}: embeddings already exist. Use --force to overwrite. ---")
                 continue
 
+            # the GPU record belongs to the old embeddings; the worker writes a new one if it measures
+            (EMBED_DIR / f"{key}_gpu.json").unlink(missing_ok=True)
             print(f"\n--- Launching subprocess for: {key.upper()} ---")
             cmd = [
                 sys.executable, str(Path(__file__).resolve()),
@@ -295,6 +347,7 @@ def main():
     config = MODELS[key]
     print(f"\n--- Processing: {key.upper()} ---")
     print(f"    Model: {config['description']}")
+    gpu_use = {}
     try:
         embeddings = generate_embeddings(
             texts=combined_texts,
@@ -304,6 +357,7 @@ def main():
             dtype=config.get("dtype"),
             max_seq_length=config.get("max_seq_length"),
             item=key,
+            gpu_use=gpu_use,
         )
     except Exception as e:
         print(f"  Error generating embeddings for '{key}': {e}")
@@ -312,6 +366,11 @@ def main():
     output_path = EMBED_DIR / f"{key}_prompt.npy"
     np.save(output_path, embeddings)
     print(f"  Saved embeddings to: {output_path.name}")
+    if gpu_use:   # read by the dashboard's Resources table
+        gpu_use["measured_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        (EMBED_DIR / f"{key}_gpu.json").write_text(json.dumps(gpu_use, indent=2), encoding="utf-8")
+        print(f"      GPU: {gpu_use['vram_peak_mb']:.0f} MB VRAM peak"
+              + (f", {gpu_use['gpu_util_mean']:.0f}% average use" if gpu_use["gpu_util_mean"] is not None else ""))
     print(f"      Shape: {embeddings.shape}")
     print(f"      Size: {embeddings.nbytes / 1e6:.2f} MB")
     return 0

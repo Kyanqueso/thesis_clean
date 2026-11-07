@@ -389,7 +389,7 @@ function runParams() {
 function goStep(n) {
   $$(".step").forEach((s) => (s.hidden = +s.dataset.step !== n));
   $("#wiz-dots").hidden = n === 0;
-  const pos = n === 4 ? 2 : n;   // the full-pipeline form sits where "pick" does
+  const pos = n >= 4 ? 2 : n;   // the full-pipeline and resources forms sit where "pick" does
   $$("#wiz-dots i").forEach((d, i) => d.classList.toggle("on", i < pos));
   launchMsg("");
   if (n === 2) { renderMatrix(); updateReviewBtn(); }
@@ -449,6 +449,26 @@ $("#b-confirm-full").addEventListener("click", () => {
   for (const p of Object.keys(STATE.pipelines))
     for (const m of STATE.modes) LAST_RUN_KEYS.add(`${p}|${m}`);
   queueJob("full", fullParams());
+  goStep(0);
+});
+
+/* ---- resource benchmark ---- */
+function resourceParams() {
+  return {
+    models: $$(".rs-model").filter((c) => c.checked).map((c) => c.value).join(","),
+    stages: $$(".rs-stage").filter((c) => c.checked).map((c) => c.value).join(","),
+  };
+}
+const updateResourcesBtn = () => {
+  const p = resourceParams();
+  $("#b-confirm-resources").disabled = !p.models || !p.stages;
+};
+$$("#tab-runs [data-step='5'] input").forEach((i) => i.addEventListener("change", updateResourcesBtn));
+
+$("#b-resources").addEventListener("click", () => { updateResourcesBtn(); goStep(5); });
+$("#b-confirm-resources").addEventListener("click", () => {
+  LAST_RUN_KEYS = new Set();
+  queueJob("resources", resourceParams());
   goStep(0);
 });
 
@@ -542,6 +562,7 @@ const jobLabel = (j) =>
   j.stage === "sweep" ? "all 9 runs" :
   j.stage === "full" ? "full pipeline" :
   j.stage === "dataset" ? `dataset: ${j.params.which}` :
+  j.stage === "resources" ? "resource benchmark" :
   j.stage === "run" ? `${pShort(j.params.pipeline)} / ${MODE_SHORT[j.params.mode]}` : j.stage;
 
 /* Job times arrive as epoch seconds. Rows carry a short local stamp with the
@@ -621,11 +642,13 @@ const PHASE_NAME = {
   load: "Loading model", tokenize: "Tokenizing", embed: "Embedding",
   connect: "Connecting to", upload: "Uploading to Vast.ai", setup: "Setting up",
   project: "Projections", train: "Training", report: "Writing results",
+  gpu: "Measuring GPU use", classify: "Measuring classifier",
 };
 const stepName = (label) => label
   .replace(/pipeline(\d)_\w+/, "P$1")
   .replace("user_intent_only", "intent-only").replace("context_only", "context-only")
-  .replace("generate_embeddings", "embeddings").replace("train_evaluate_visualize", "training");
+  .replace("generate_embeddings", "embeddings").replace("train_evaluate_visualize", "training")
+  .replace("benchmark_resources", "resources");
 
 function renderProgress(job) {
   const box = $("#prog");
@@ -1320,20 +1343,23 @@ function renderRfHeat(rows, picks) {
 }
 
 /* ---------- resources ----------
-   One row per pipeline × embedding × classifier, normal mode, all measured on one
-   benchmark PC by src/benchmark_resources.py. The embedding columns are shared by
-   every classifier on that embedding, so they span the group's rows. */
+   One row per pipeline × embedding × classifier, normal mode. Measured by the runs
+   themselves (training run + embedding step) and by Run → Measure resources; per row
+   the server picks the newer. The embedding columns are shared by every classifier on
+   that embedding, so they span the group's rows. */
 let RES = null;
 const RS = { rows: "best" };
 
 const RS_TIP = {
-  vram: "Most GPU memory PyTorch held while embedding the sample prompts, in MB.\nOpenAI has none: it runs on OpenAI's servers.",
-  gpu: "How busy the GPU was while embedding: average / highest, in %.\nMeasured for the whole card, so other GPU programs were closed.",
+  vram: "Most GPU memory PyTorch held while embedding (the whole dataset in a run, 1,000 prompts in "
+    + "Measure resources), in MB.\nOpenAI has none: it runs on OpenAI's servers. Blank when neither has "
+    + "measured it on this GPU (embeddings made before this was recorded, on the CPU, or on Vast.ai).",
+  gpu: "How busy the GPU was while embedding: average / highest, in %.\nMeasured for the whole card, so anything else on the GPU counts too.",
   embdisk: "Disk space of the stored embeddings for the whole dataset, in MB.",
   fit: "Time to train the classifier, in seconds.",
   cpu: "CPU time spent training, in seconds.\nHigher than the training time when several cores work at once.",
-  ram: "Most RAM the training process used, in MB: Python, the loaded embeddings and the classifier together.\n"
-    + "This is how much memory the machine needs to train it.",
+  ram: "Most extra RAM training took, in MB, on top of what was already loaded (Python and the embeddings),\n"
+    + "helper processes included. Blank for runs trained before this was recorded, until re-measured.",
   p50: "Median time for the classifier to score one prompt, in milliseconds.",
   p99: "99th-percentile time to score one prompt: the slow tail, in milliseconds.",
   model: "Disk space of the saved classifier, in MB.",
@@ -1390,7 +1416,7 @@ function renderResources() {
       }
       body += `<tr${cls ? ` class="${cls}"` : ""}>${emb}
         <td class="rs-clf">${esc(CLF_SHORT[r.Classifier] || r.Classifier)}</td>
-        <td class="num">${n(r.fit_s, 1)}</td><td class="num">${n(r.cpu_s, 1)}</td><td class="num">${n(r.peak_ram_mb, 0)}</td>
+        <td class="num">${n(r.fit_s, 1)}</td><td class="num">${n(r.cpu_s, 1)}</td><td class="num">${n(r.ram_mb, 0)}</td>
         <td class="num">${n(r.p50_ms, 2)}</td><td class="num">${n(r.p99_ms, 2)}</td>
         <td class="num">${n(r.model_mb, 2)}</td></tr>`;
     });
@@ -1406,7 +1432,7 @@ function renderResources() {
     <tr>${th("Pipeline", COL_TIP.Pipeline, "")}${th("Emb", COL_TIP.Emb, "")}
       ${th("VRAM MB", RS_TIP.vram)}${th("GPU %", RS_TIP.gpu)}${th("disk MB", RS_TIP.embdisk)}
       ${th("Classifier", `${CLF_ABBR}.`, "")}
-      ${th("fit s", RS_TIP.fit)}${th("CPU s", RS_TIP.cpu)}${th("peak RAM MB", RS_TIP.ram)}
+      ${th("fit s", RS_TIP.fit)}${th("CPU s", RS_TIP.cpu)}${th("fit RAM MB", RS_TIP.ram)}
       ${th("p50 ms", RS_TIP.p50)}${th("p99 ms", RS_TIP.p99)}${th("model MB", RS_TIP.model)}</tr>${body}`
     : `<tr><td class="muted">Nothing to show for this selection.</td></tr>`;
 
@@ -1416,9 +1442,11 @@ function renderResources() {
     ? `<span>Measured on ${esc([m?.gpu, m?.cpu, m?.ram_gb ? `${m.ram_gb} GB RAM` : ""].filter(Boolean).join(" · "))}${
         RES.measured_at ? `, ${esc(RES.measured_at.slice(0, 10))}` : ""}</span>
        <span>normal mode · classifiers run on the CPU only</span>
+       <span>${RES.n_benchmark ? `${RES.n_benchmark} of ${RES.rows.length} rows from Measure resources, the rest from the runs`
+         : "from the runs"} · the newer measurement is shown</span>
        ${RS.rows === "all" ? `<span><i class="key-edge"></i>blue edge = the classifier Master results shows</span>` : ""}`
-    : `<span>Not measured yet: only the disk sizes are filled in. On the benchmark PC, run
-       <code>venv\\Scripts\\python.exe src\\benchmark_resources.py</code>, then reload.</span>`;
+    : `<span>Not measured yet: only the disk sizes are filled in. Re-run from the Run tab, or use
+       Run → Measure resources.</span>`;
 }
 
 /* ---------- collapsible cards ----------
