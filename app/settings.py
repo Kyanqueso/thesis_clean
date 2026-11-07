@@ -1,9 +1,4 @@
-"""Dashboard settings, kept in the repo's gitignored .env.
-
-Saving also updates this process's environment, and jobs inherit it, so a new
-key is live for the next job and the next Simulation request without a restart.
-Secrets are write-only from the browser's side: public() returns a masked tail.
-"""
+"""Dashboard settings in the gitignored .env; saving updates os.environ too, so the next job sees them."""
 
 from __future__ import annotations
 
@@ -15,7 +10,7 @@ from app.paths import ROOT
 
 ENV_PATH = ROOT / ".env"
 
-# name -> is it a secret
+# name -> is it a secret (secrets are write-only: the browser only ever sees a masked tail)
 FIELDS = {
     "OPENAI_API_KEY": True,
     "OPENAI_TPM": False,
@@ -60,9 +55,7 @@ def _check(name: str, v: str) -> None:
 
 
 def save(values: dict) -> None:
-    """Apply {name: value}. "" clears a field; a name left out is untouched (how
-    the form leaves a secret alone). Everything is validated before anything is
-    written, so a bad field cannot leave half a save behind."""
+    """Apply {name: value}; "" clears a field, an omitted name is untouched, and nothing is written unless all are valid."""
     clean = {}
     for name, v in values.items():
         if name not in FIELDS:
@@ -82,7 +75,7 @@ def save(values: dict) -> None:
                 unset_key(ENV_PATH, name)
 
     if "OPENAI_API_KEY" in clean:
-        # the Simulation tab caches its OpenAI client, built from the old key
+        # the Simulation tab caches an OpenAI client built from the old key
         from app import detect
         detect._embedder_cache.pop("openai", None)
 
@@ -92,7 +85,7 @@ def test_openai() -> dict:
         return {"ok": False, "detail": "no key saved"}
     from openai import OpenAI
     try:
-        # free, and it proves both the key and access to the model the pipeline uses
+        # free, and proves both the key and access to the model the pipeline uses
         OpenAI(timeout=20).models.retrieve("text-embedding-3-small")
     except Exception as e:
         return {"ok": False, "detail": f"{type(e).__name__}: {e}"}

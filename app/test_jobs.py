@@ -60,7 +60,7 @@ def test_smoke_stays_out_of_real_runs():
     real_runs, real_data = paths.RUNS_DIR, jobs.data_path
     with tempfile.TemporaryDirectory() as d:
         try:
-            paths.RUNS_DIR = paths.RUNS_WRITE_DIR = Path(d)
+            paths.RUNS_DIR = Path(d)
             data = Path(d) / "data.jsonl"
             data.write_text("".join(f'{{"i": {i}}}\n' for i in range(100)), encoding="utf-8")
             jobs.data_path = lambda p: data
@@ -73,7 +73,7 @@ def test_smoke_stays_out_of_real_runs():
                 assert len(copy.read_text(encoding="utf-8").splitlines()) == 10
         finally:
             jobs.data_path = real_data
-            paths.RUNS_DIR = paths.RUNS_WRITE_DIR = real_runs
+            paths.RUNS_DIR = real_runs
 
 
 def test_full_builds_only_missing_datasets():

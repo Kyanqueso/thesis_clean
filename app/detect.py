@@ -3,23 +3,22 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import numpy as np
 
 from app import paths
 from app.runs import EMB_MODELS, MODES, PIPELINES, run_dir
 
-SEPARATOR = "\n\n---\n\n"  # must match generate_embeddings.py default
+SEPARATOR = "\n\n---\n\n"  # must match SEPARATOR in src/generate_embeddings.py
 
+# embedders and classifiers are loaded on first use and kept, so only the first request is slow
 _model_cache: dict[str, object] = {}
 _embedder_cache: dict[str, object] = {}
 
 
 def available_models() -> list[dict]:
-    """Scan runs/*/*/models/*.joblib for scorable configurations."""
+    """Every saved classifier under runs/*/*/models/*.joblib."""
     out = []
-    paths.ensure_current()
     if not paths.RUNS_DIR.is_dir():
         return out
     for pipeline in PIPELINES:
@@ -37,16 +36,14 @@ def available_models() -> list[dict]:
 
 
 def options() -> dict:
-    """Scorable models plus, when there are none, why and what fixes it."""
+    """Scorable models, or, when there are none, why and how to fix it."""
     models = available_models()
     if models:
         return {"models": models}
     return {
         "models": [],
-        "reason": ("no saved classifiers in this tree — delivered runs ship results "
-                   "and figures, but no models/ directory"),
-        "fix": ("queue a run from the Run tab with “save models” checked (it is on "
-                "by default); the models land in <run>/models/*.joblib"),
+        "reason": "no saved classifiers in this runs folder yet",
+        "fix": "train a run from the Run tab; its models land in <run>/models/*.joblib",
     }
 
 
@@ -94,7 +91,7 @@ def score(pipeline: str, mode: str, emb: str, clf: str,
     elif mode == "context_only":
         text = context
     else:
-        text = f"{user_intent}{SEPARATOR}{context}"   # same order as src/generate_embeddings.py
+        text = f"{user_intent}{SEPARATOR}{context}"  # intent first, as in training
     if not text.strip():
         return {"error": "empty input"}
 

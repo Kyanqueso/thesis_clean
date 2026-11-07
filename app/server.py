@@ -1,13 +1,12 @@
-"""thesis_clean dashboard.
-
-Run from the repo root:
-    venv\\Scripts\\python.exe -m app.server        (http://127.0.0.1:8756)
-"""
+"""Dashboard server. From the repo root: venv\\Scripts\\python.exe -m uvicorn app.server:app --port 8756"""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -34,20 +33,9 @@ def get_results():
 
 @app.get("/api/master")
 def get_master(reference: str = Query(default="normal")):
-    """One row per pipeline x embedding x classifier: reference-mode metrics,
-    ablation degradation and McNemar significance in a single grid."""
     if reference not in runs.MODES:
         raise HTTPException(404, f"unknown mode: {reference}")
     return runs.master_table(reference)
-
-
-@app.get("/api/curves")
-def get_curves(pipeline: str, mode: str):
-    """ROC/PR curves for a run. A run without predictions.npz answers 200 with
-    available:false and how to get them, rather than failing."""
-    if pipeline not in runs.PIPELINES or mode not in runs.MODES:
-        raise HTTPException(404, "unknown run")
-    return runs.curves(pipeline, mode)
 
 
 @app.get("/api/figure")
@@ -75,7 +63,7 @@ def get_sample(pipeline: str, n: int = Query(default=1, ge=1, le=25)):
 # ---------------- file explorer ----------------
 
 def _safe_path(path: str) -> Path:
-    """Map a browser-supplied relative path onto disk (see paths.INSPECT_ROOTS)."""
+    """Map a browser-supplied relative path onto disk, refusing anything outside the data and runs trees."""
     if "\\" in path or ".." in path.split("/"):
         raise HTTPException(400, "bad path")
     p = paths.resolve(path)
@@ -93,7 +81,6 @@ def get_files():
 
 @app.get("/api/file/inspect")
 def inspect_file(path: str):
-    import numpy as np
     p = _safe_path(path)
     suf = p.suffix.lower()
     if suf == ".npy":
@@ -104,16 +91,10 @@ def inspect_file(path: str):
         lines = [f"{k}: shape {tuple(z[k].shape)} · dtype {z[k].dtype}" for k in z.files]
         return {"type": "text", "text": "numpy archive\n" + "\n".join(lines)}
     if suf == ".jsonl":
-        lines = []
         with open(p, encoding="utf-8", errors="replace") as f:
-            for i, line in enumerate(f):
-                if i >= 3:
-                    break
-                lines.append(line[:600].rstrip())
+            lines = [line[:600].rstrip() for _, line in zip(range(3), f)]
         return {"type": "text", "text": "\n".join(lines) + "\n… (first 3 rows)"}
     if suf == ".csv":
-        import json
-        import pandas as pd
         df = pd.read_csv(p, nrows=10)
         data = json.loads(df.to_json(orient="split"))  # numpy scalars are not JSON
         return {"type": "table", "cols": data["columns"], "rows": data["data"],
@@ -133,22 +114,6 @@ def raw_file(path: str):
     if p.suffix.lower() != ".png":
         raise HTTPException(400, "raw serving is limited to .png")
     return FileResponse(p)
-
-
-# ---------------- breakdowns ----------------
-
-@app.get("/api/breakdown/fields")
-def get_breakdown_fields(pipeline: str):
-    if pipeline not in runs.PIPELINES:
-        raise HTTPException(404, "unknown pipeline")
-    return runs.breakdown_fields(pipeline)
-
-
-@app.get("/api/breakdown")
-def get_breakdown(pipeline: str, mode: str, key: str, by: str):
-    if pipeline not in runs.PIPELINES or mode not in runs.MODES:
-        raise HTTPException(404, "unknown run")
-    return runs.breakdown(pipeline, mode, key, by)
 
 
 # ---------------- jobs ----------------
@@ -177,13 +142,20 @@ def get_log(job_id: str, offset: int = 0):
     job = QUEUE.get(job_id)
     if job is None:
         raise HTTPException(404, "unknown job")
-    text = ""
+    offset, data = max(0, offset), b""
+    # bytes, not text: Windows logs end lines in \r\n, and counting decoded characters drifted the offset
     if job.log_path.is_file():
-        with open(job.log_path, "r", encoding="utf-8", errors="replace") as f:
-            f.seek(max(0, offset))
-            text = f.read()
-    return {"text": text, "offset": offset + len(text.encode("utf-8", errors="replace")),
-            "status": job.status}
+        with open(job.log_path, "rb") as f:
+            f.seek(offset)
+            data = f.read()
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        if e.start >= len(data) - 3:  # a character cut in half at the end: send it with the next poll
+            data = data[:e.start]
+        text = data.decode("utf-8", "replace")
+    return {"text": text.replace("\r\n", "\n").replace("\r", "\n"),
+            "offset": offset + len(data), "status": job.status}
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -237,9 +209,8 @@ def detect_options():
 @app.post("/api/detect")
 def post_detect(req: DetectRequest):
     try:
-        out = detect.score(req.pipeline, req.mode, req.emb, req.clf,
-                           req.user_intent, req.context)
-    except Exception as e:  # embedding backends can fail in many ways (no key, no VRAM...)
+        out = detect.score(req.pipeline, req.mode, req.emb, req.clf, req.user_intent, req.context)
+    except Exception as e:  # embedding backends fail in many ways (no key, no memory...)
         return JSONResponse(status_code=500, content={"error": f"{type(e).__name__}: {e}"})
     if "error" in out:
         return JSONResponse(status_code=400, content=out)
@@ -251,8 +222,7 @@ def post_detect(req: DetectRequest):
 @app.middleware("http")
 async def no_cache_static(request, call_next):
     response = await call_next(request)
-    # dev server: always revalidate so edits to static assets show up on reload
-    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Cache-Control"] = "no-cache"  # edits to static files show on reload
     return response
 
 

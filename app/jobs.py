@@ -13,6 +13,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pandas as pd
+
 from app import paths, settings, vast
 from app.paths import ROOT, write_run_dir
 from app.runs import EMB_MODELS, MODES, PIPELINES, data_path
@@ -145,10 +147,10 @@ def _limited_copy(src: Path, limit: int, dest: Path) -> Path:
 
 
 def _already_trained(results_dir: Path, models: str | None) -> bool:
-    """True when this run's results table already covers every requested embedding."""
-    import pandas as pd
+    """True when this run's results already cover every requested embedding, from the current pipeline."""
     csv_path = results_dir / "full_evaluation_results.csv"
-    if not csv_path.is_file():
+    # operating_points.csv is only written by the current code, so older results count as unfinished
+    if not csv_path.is_file() or not (results_dir / "operating_points.csv").is_file():
         return False
     wanted = {m.strip().upper() for m in (models.split(",") if models else EMB_MODELS)}
     try:
