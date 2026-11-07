@@ -35,13 +35,8 @@ ATTACK_FILES = {
 }
 ATTACK_SUBDIR = "attacks"
 
-CNN_TEMPLATES = [
-    "Summarize this article in a few sentences.",
-    "What is the main news event described in this article?",
-    "Write a short headline for this article.",
-    "What are the key facts in this article?",
-    "Explain what happened, based on this article.",
-]
+# CNN/DailyMail has no user question, so every article gets this one
+CNN_INTENT = "Summarize the following text"
 
 
 def ensure_nltk_punkt():
@@ -187,7 +182,8 @@ def pull_cosqa(n: int, seed: int) -> list[dict]:
     def entries():
         for i, row in enumerate(tqdm(ds, desc="CoSQA")):
             code = (row.get("code") or "").strip()
-            intent = (row.get("docstring_tokens") or "").strip()
+            # the web query the code was retrieved for; some are wrapped in quotes
+            intent = (row.get("doc") or "").strip().strip('"').strip()
             if code and intent and usable_length(code, 20, 6000):
                 yield {"doc_id": f"cosqa_{row.get('idx', i)}",
                        "context": code, "user_intent": intent}
@@ -241,13 +237,10 @@ def pull_cnn_dailymail(n: int, seed: int) -> list[dict]:
         for i, row in enumerate(tqdm(ds, desc="CNN/DailyMail", total=n)):
             article = (row.get("article") or "").strip()[:6000]
             if usable_length(article, 200, 6000):
-                yield {"doc_id": f"cnn_dailymail_{row.get('id', i)}", "context": article}
+                yield {"doc_id": f"cnn_dailymail_{row.get('id', i)}", "context": article,
+                       "user_intent": CNN_INTENT}
 
-    rows = _collect(entries(), n, "CNN/DailyMail")
-    # CNN has no user question, so the intents rotate through fixed summarisation templates
-    for k, row in enumerate(rows):
-        row["user_intent"] = CNN_TEMPLATES[k % len(CNN_TEMPLATES)]
-    return rows
+    return _collect(entries(), n, "CNN/DailyMail")
 
 
 SOURCES = {
