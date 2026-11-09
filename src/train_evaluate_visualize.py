@@ -272,13 +272,22 @@ def load_data(data_path: Path) -> pd.DataFrame | None:
     print(f"   - Benign: {(~labels.astype(bool)).sum():,} ({1-labels.mean():.1%})")
     return df
 
+def stratify_key(sub: pd.DataFrame) -> np.ndarray:
+    """Label x category (Pipeline 2 names it `source`); label alone if a stratum is too small to split."""
+    col = next((c for c in ("category", "source") if c in sub.columns), None)
+    if col is None:
+        return sub["label"].values
+    key = sub["label"].astype(str) + "|" + sub[col].astype(str)
+    return key.values if key.value_counts().min() >= 2 else sub["label"].values
+
+
 def split_rows(df: pd.DataFrame, indices: np.ndarray, test_size: float,
                seed: int) -> tuple[np.ndarray, np.ndarray]:
-    """Split `indices` grouped by document text when rows have documents, else stratified by label."""
+    """Split `indices` grouped by document text when rows have documents, else stratified by label and category."""
     sub = df.iloc[indices]
     if "doc_id" not in df.columns:
         return train_test_split(indices, test_size=test_size,
-                                stratify=sub["label"].values, random_state=seed)
+                                stratify=stratify_key(sub), random_state=seed)
 
     # group by clean text, not doc_id, so twins and repeated documents stay on one side
     key = sub["original_context"] if "original_context" in df.columns else sub["doc_id"]
@@ -342,6 +351,7 @@ def operating_points(cal_prob, y_cal, test_prob, y_test) -> dict:
     for target in TARGET_FPRS:
         t = threshold_for_fpr(cal_prob[y_cal == 0], target)
         name = f"{target * 100:g}%FPR"
+        out[f"Threshold@{name}"] = t
         out[f"TPR@{name}"] = float((test_prob[y_test == 1] >= t).mean())
         out[f"FPR@{name}"] = float((test_prob[y_test == 0] >= t).mean())
     return out
@@ -730,7 +740,7 @@ def main():
     ops_df.to_csv(RESULTS_DIR / 'operating_points.csv', index=False)
     print(f"   Operating points (thresholds set on the calibration split) saved to: "
           f"{RESULTS_DIR / 'operating_points.csv'}")
-    print((ops_df.set_index(['Embeddings', 'Classifier']) * 100).round(2).to_string())
+    print((ops_df.set_index(['Embeddings', 'Classifier']).filter(like='PR@') * 100).round(2).to_string())
 
     # per-sample probabilities, read by the dashboard and by the cross-ablation McNemar
     np.savez_compressed(RESULTS_DIR / 'predictions.npz',

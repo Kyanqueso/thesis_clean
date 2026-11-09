@@ -36,7 +36,7 @@ ATTACK_FILES = {
 ATTACK_SUBDIR = "attacks"
 
 # CNN/DailyMail has no user question, so every article gets this one
-CNN_INTENT = "Summarize the following text"
+CNN_INTENT = "Summarize the following text."
 
 
 def ensure_nltk_punkt():
