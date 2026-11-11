@@ -62,13 +62,6 @@ function pipelineVerdict(pipeline) {
   return { pipeline, best, normal, intent, context: aucOf("context_only"), verdict };
 }
 
-const VERDICT_NOTE = {
-  detects: "intent alone is near chance — the signal is in the injected context",
-  shortcut: "intent alone already separates the classes — corpus artifact",
-  inconclusive: "neither clearly detecting nor clearly a shortcut",
-  "no runs": "no results for this pipeline yet",
-};
-
 // hover text on the verdict tag: the exact rule, built from the thresholds above
 // so it cannot drift from what the code decides
 const VERDICT_TIP = {
@@ -107,7 +100,6 @@ function renderVerdicts() {
       ${verdictRow(v, "user_intent_only", "intent-only")}
       ${verdictRow(v, "context_only", "context-only")}
     </div>
-    <div class="v-why muted">${VERDICT_NOTE[v.verdict]}</div>
   </div>`).join("");
 }
 
@@ -869,7 +861,7 @@ function renderMaster() {
   const band = (n, label, tip) => (n ? `<th colspan="${n}"${tipAttr(tip)}>${label}</th>` : "");
   let head = `<tr class="grp">
     ${band(3, "Configuration", "Which run the row describes.")}
-    ${band(q.length, `Detection — ${esc(refName)}`,
+    ${band(q.length, `Detection: ${esc(refName[0].toUpperCase() + refName.slice(1))}`,
       `How well the ${refName} run detects injections.\nThreshold metrics use 0.5; ROC-AUC and PR-AUC use no threshold.`)}
     ${band(errs.length, "Errors", "False alarms: benign rows wrongly flagged as malicious, at the 0.5 threshold.")}
     ${band(lowFpr.length, "Low false-alarm",
@@ -910,8 +902,7 @@ function renderMaster() {
     ${degVars.includes("user_intent_only") && ref === "normal"
       ? `<span><b class="key-bad">red</b> = intent-only Δ ≤ 0.5 pp: the intent alone is enough → shortcut</span>` : ""}
     <span><span class="ns">ns</span> = not significant (McNemar, Holm, p ≥ 0.05)</span>
-    <span class="key-hint">hover a header or a Δ for details · ${SORT_HINT}</span>`
-    : `<span class="key-hint">${SORT_HINT}</span>`;
+    <span class="key-hint">hover a header or a Δ for details</span>` : "";
 
   const notes = MASTER.notes || [];
   $("#master-notes").innerHTML = notes.length
@@ -1195,6 +1186,8 @@ const RF_TIP = {
   "Classifier": "The classifier trained on the embeddings.\nA blue left edge marks the one Master results shows (best normal ROC-AUC).\n"
     + `${CLF_ABBR}.`,
   "Inference-Time-per-Sample(ms)": "Total inference time on the test set ÷ number of rows, in microseconds.",
+  "Train-Time(s)": "Time to train the classifier, in seconds, timed in the run that produced these scores.\n"
+    + "Resources used shows a separate re-measurement, so the two can differ by a few percent.",
 };
 const RF_METRICS = [["ROC-AUC", "ROC-AUC"], ["PR-AUC", "PR-AUC"], ["F1-Score", "F1"], ["Accuracy", "Acc"]];
 const RF_SORT = { col: null, dir: 0 };
@@ -1223,7 +1216,6 @@ function sortByPipeline(rows, s) {
 }
 
 const sortArrow = (s, key) => (s.col === key ? (s.dir < 0 ? " ▼" : " ▲") : "");
-const SORT_HINT = "click a header to sort: descending, ascending, then back to default · rows stay grouped by pipeline";
 
 function onSortClick(box, s, render) {
   $(box).addEventListener("click", (e) => {
@@ -1326,8 +1318,7 @@ function renderResultsTable() {
   }
 
   $("#rf-body").innerHTML = `<div class="scroll"><table id="results-table">${`<tr>${header}</tr>`}${body}</table></div>
-    <div class="key"><span><i class="key-edge"></i>blue edge = the classifier Master results shows for that pipeline × embedding</span>
-      <span class="key-hint">${SORT_HINT}</span></div>`;
+    <div class="key"><span><i class="key-edge"></i>blue edge = the classifier Master results shows for that pipeline × embedding</span></div>`;
 }
 onSortClick("#rf-body", RF_SORT, renderResultsTable);
 
@@ -1387,7 +1378,9 @@ const RS_TIP = {
     + "measured it on this GPU (embeddings made before this was recorded, on the CPU, or on Vast.ai).",
   gpu: "How busy the GPU was while embedding: average / highest, in %.\nMeasured for the whole card, so anything else on the GPU counts too.",
   embdisk: "Disk space of the stored embeddings for the whole dataset, in MB.",
-  fit: "Time to train the classifier, in seconds.",
+  fit: "Time to train the classifier, in seconds.\n"
+    + "Taken from Measure resources (each classifier retrained alone in a fresh process) when that is newer than the run,\n"
+    + "so it can differ by a few percent from fit s in All runs, which is timed in the run itself.",
   cpu: "CPU time spent training, in seconds.\nHigher than the training time when several cores work at once.",
   cpupct: "How busy the CPU was while training: average / highest, in % of all its threads.\n"
     + "Average = CPU s ÷ (fit s × threads). Highest = the busiest half-second.\n"
@@ -1470,7 +1463,9 @@ function renderResources() {
       <th data-tip="Saved classifier file.">Disk</th></tr>
     <tr>${th("Pipeline", COL_TIP.Pipeline, "Pipeline", "")}${th("Emb", COL_TIP.Emb, "Embeddings", "")}
       ${th("VRAM MB", RS_TIP.vram, "vram_mb")}${th("GPU %", RS_TIP.gpu, "gpu_mean")}${th("disk MB", RS_TIP.embdisk, "emb_disk_mb")}
-      ${th("Classifier", `${CLF_ABBR}.`, "Classifier", "")}
+      ${th("Classifier", (RS.rows === "best"
+        ? "The classifier Master results shows for this pipeline × embedding (best normal ROC-AUC)."
+        : "Each classifier trained on these embeddings, one row each.") + `\n${CLF_ABBR}.`, "Classifier", "")}
       ${th("fit s", RS_TIP.fit, "fit_s")}${th("CPU s", RS_TIP.cpu, "cpu_s")}${th("CPU %", RS_TIP.cpupct, "cpu_pct")}${th("fit RAM MB", RS_TIP.ram, "ram_mb")}
       ${th("p50 ms", RS_TIP.p50, "p50_ms")}${th("p99 ms", RS_TIP.p99, "p99_ms")}${th("model MB", RS_TIP.model, "model_mb")}</tr>${body}`
     : `<tr><td class="muted">Nothing to show for this selection.</td></tr>`;
@@ -1486,8 +1481,7 @@ function renderResources() {
        <span>normal mode · classifiers run on the CPU only</span>
        <span>${RES.n_benchmark ? `${RES.n_benchmark} of ${RES.rows.length} rows from Measure resources, the rest from the runs`
          : "from the runs"} · the newer measurement is shown</span>
-       ${RS.rows === "all" ? `<span><i class="key-edge"></i>blue edge = the classifier Master results shows</span>` : ""}
-       <span class="key-hint">${SORT_HINT}</span>`
+       ${RS.rows === "all" ? `<span><i class="key-edge"></i>blue edge = the classifier Master results shows</span>` : ""}`
     : `<span>Not measured yet: only the disk sizes are filled in. Re-run from the Run tab, or use
        Run → Measure resources.</span>`;
 }
