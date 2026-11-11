@@ -2003,6 +2003,17 @@ async function saveSettings(extra = {}) {
   }
 }
 
+function setTheme(light) {
+  const root = document.documentElement;
+  if (light) root.dataset.theme = "light"; else delete root.dataset.theme;
+  const label = light ? "Switch to dark theme" : "Switch to light theme";
+  $("#b-theme").title = label;
+  $("#b-theme").setAttribute("aria-label", label);
+  try { localStorage.setItem("theme", light ? "light" : "dark"); } catch {}
+}
+setTheme(document.documentElement.dataset.theme === "light");
+$("#b-theme").addEventListener("click", () => setTheme(document.documentElement.dataset.theme !== "light"));
+
 $("#b-settings").addEventListener("click", async () => {
   for (const m of ["#settings-msg", "#t-openai", "#t-vast"]) setMsg(m, "");
   $("#settings-dlg").showModal();

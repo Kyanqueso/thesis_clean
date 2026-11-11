@@ -23,6 +23,41 @@
   --bad: #e66767;
   --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  --sep: rgba(255, 255, 255, 0.34);
+  --hover: rgba(255, 255, 255, 0.04);
+  --hover-faint: rgba(255, 255, 255, 0.03);
+  --underline: rgba(255, 255, 255, 0.28);
+  --shadow: rgba(0, 0, 0, 0.5);
+  --fig-dim: brightness(0.92);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --page: #f4f3ef;
+  --card: #ffffff;
+  --card2: #efeee9;
+  --text: #1d1c19;
+  --ink-2: #3b3a35;
+  --muted: #66655f;
+  --grid: #e1e0da;
+  --border: rgba(0, 0, 0, 0.13);
+  --border-strong: rgba(0, 0, 0, 0.26);
+  --accent: #1f6bc9;
+  --accent-soft: rgba(31, 107, 201, 0.12);
+  --ok: #0f8a0f;
+  --ok-text: #0b6e0b;
+  --warn: #d18b00;
+  --warn-text: #8a5a00;
+  --bad: #c42f2f;
+  --sep: rgba(0, 0, 0, 0.32);
+  --hover: rgba(0, 0, 0, 0.035);
+  --hover-faint: rgba(0, 0, 0, 0.03);
+  --underline: rgba(0, 0, 0, 0.3);
+  --shadow: rgba(0, 0, 0, 0.14);
+  --fig-dim: none;
+  --m-normal: #2a72d0;
+  --m-intent: #c44c1a;
+  --m-context: #12805a;
 }
 
 * { box-sizing: border-box; }
@@ -124,7 +159,7 @@ h3 { font-size: 12px; color: var(--muted); margin: 8px 0 4px; font-weight: 650; 
 .ab-svg { width: 100%; height: auto; display: block; }
 .ab-grid { stroke: var(--grid); stroke-width: 1; }
 .ab-chance { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 4 3; }
-.ab-sep { stroke: rgba(255, 255, 255, 0.34); stroke-width: 2; }
+.ab-sep { stroke: var(--sep); stroke-width: 2; }
 .ab-sep-thin { stroke: var(--border); stroke-width: 1; }
 .ab-best { fill: var(--accent); font-weight: 600; }
 .ab-tick { fill: var(--muted); font: 12px var(--sans); }
@@ -132,13 +167,13 @@ h3 { font-size: 12px; color: var(--muted); margin: 8px 0 4px; font-weight: 650; 
 /* one hover target per group; everything drawn over it lets the pointer through */
 .ab-svg * { pointer-events: none; }
 .ab-svg .ab-hit { pointer-events: all; fill: transparent; }
-.ab-svg .ab-hit:hover { fill: rgba(255, 255, 255, 0.04); }
+.ab-svg .ab-hit:hover { fill: var(--hover); }
 .ab-note { margin-left: auto; font-size: 12px; color: var(--muted); }
 
 .ab-tip {
   position: absolute; z-index: 5; pointer-events: none;
   background: var(--card2); border: 1px solid var(--border-strong); border-radius: 9px;
-  padding: 10px 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); white-space: nowrap;
+  padding: 10px 12px; box-shadow: 0 8px 24px var(--shadow); white-space: nowrap;
 }
 .ab-tip .tip-h { font-size: 13px; font-weight: 650; color: var(--text); }
 .ab-tip .tip-sub { font-size: 12px; color: var(--muted); margin: 2px 0 8px; }
@@ -234,7 +269,7 @@ details.why > summary:hover { color: var(--accent); }
 table { border-collapse: collapse; width: 100%; font-size: 14px; }
 th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 th { color: var(--muted); font-weight: 600; font-size: 13px; cursor: pointer; user-select: none; }
-tbody tr:hover td, table tr:hover td { background: rgba(255, 255, 255, 0.04); }
+tbody tr:hover td, table tr:hover td { background: var(--hover); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.wrapcell { white-space: normal; min-width: 150px; }
 /* a row Master results shows: an accent edge only — bolding whole rows was loud */
@@ -275,11 +310,8 @@ table.plain th { cursor: default; }
 .figures figure { margin: 0; min-width: 0; }
 .figures img {
   display: block; width: 100%; border-radius: 7px; border: 1px solid var(--border); background: #fff;
-  filter: brightness(0.8); transition: filter 0.15s;
+  filter: var(--fig-dim);
 }
-/* figures/previews are white-background PNGs — matted, not inverted, to stay legible;
-   dimmed at rest so ten white panels do not glare off the dark page */
-.figures a:hover img, .figures a:focus-visible img { filter: none; }
 
 /* the summary is a tall 4:3 page; capped so it does not fill the screen */
 .fig-summary { margin-bottom: 18px; }
@@ -291,7 +323,7 @@ table.plain th { cursor: default; }
 .fig-head .fig-cells > div { min-width: 0; font-size: 12px; font-weight: 600; color: var(--muted); padding-bottom: 6px; }
 .fig-emb-row { padding: 12px 0; }
 /* same divider as the table and chart pipelines */
-.fig-emb-row + .fig-emb-row { border-top: 2px solid rgba(255, 255, 255, 0.34); }
+.fig-emb-row + .fig-emb-row { border-top: 2px solid var(--sep); }
 .fig-missing {
   min-width: 0; display: grid; place-items: center;
   border: 1px dashed var(--border); border-radius: 7px;
@@ -439,6 +471,7 @@ button.pipe-chip:disabled { opacity: 0.35; cursor: not-allowed; border-color: va
 }
 .gear:hover { color: var(--accent); background: var(--card2); }
 .gear svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+:root[data-theme="light"] #b-theme .ic-sun, :root:not([data-theme="light"]) #b-theme .ic-moon { display: none; }
 #settings-dlg {
   width: min(560px, 94vw); max-height: 90vh; padding: 0; overflow: hidden;
   border: 1px solid var(--border); border-radius: 12px;
@@ -674,7 +707,7 @@ table.master tr.grp th:empty { background: transparent; border-bottom: 0; }
 /* neutral rule plus a little air between pipelines; the accent blue pulled the eye */
 /* 2px, not 1px: in a collapsed table an equal-width border competes with the
    row line above it, and the 1px version barely read as a divider */
-tr.pipe-sep td { border-top: 2px solid rgba(255, 255, 255, 0.34); }
+tr.pipe-sep td { border-top: 2px solid var(--sep); }
 td.wrapcell { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
 
 /* Δ colour encodes the SIGN, not the size: an ablation that costs performance is
@@ -713,7 +746,7 @@ p.note { font-size: 13px; margin: 8px 0 0; line-height: 1.5; }
 }
 #fig-img {
   max-width: 100%; max-height: calc(92vh - 96px); object-fit: contain;
-  background: #fff; border-radius: 6px; filter: brightness(0.92);
+  background: #fff; border-radius: 6px; filter: var(--fig-dim);
 }
 .fig-nav {
   position: absolute; top: 50%; transform: translateY(-50%);
@@ -739,12 +772,12 @@ p.note { font-size: 13px; margin: 8px 0 0; line-height: 1.5; }
 .tip {
   position: fixed; z-index: 50; pointer-events: none; max-width: 360px;
   background: var(--card2); border: 1px solid var(--border-strong); border-radius: 9px;
-  padding: 9px 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  padding: 9px 12px; box-shadow: 0 8px 24px var(--shadow);
   font-size: 12.5px; line-height: 1.5; color: var(--text); white-space: pre-line;
 }
 /* faint dotted underline says "hover me" without shouting */
 th[data-tip] {
-  cursor: help; text-decoration: underline dotted rgba(255, 255, 255, 0.28);
+  cursor: help; text-decoration: underline dotted var(--underline);
   text-underline-offset: 4px;
 }
 td[data-tip] { cursor: help; }
@@ -804,14 +837,14 @@ table.heat-t tr:hover td { filter: brightness(1.12); }
    pointer cursor, since clicking is what they are for */
 .v-tag[data-tip], .v-row[data-tip] { cursor: help; }
 .ab-key[data-tip], .fig-head span[data-tip] {
-  cursor: help; text-decoration: underline dotted rgba(255, 255, 255, 0.28);
+  cursor: help; text-decoration: underline dotted var(--underline);
   text-underline-offset: 4px;
 }
 
 /* collapsible cards: the title bar is the button */
 h2.fold-bar { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
   margin: -14px -16px 10px; padding: 14px 16px; border-radius: 10px; }
-h2.fold-bar:hover { background: rgba(255, 255, 255, 0.03); }
+h2.fold-bar:hover { background: var(--hover-faint); }
 h2.fold-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .fold-pill { margin-left: auto; font-size: 12px; font-weight: 600; letter-spacing: 0; text-transform: none;
   color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 3px 12px; white-space: nowrap; }
