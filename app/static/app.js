@@ -1358,6 +1358,11 @@ const RS_TIP = {
   embdisk: "Disk space of the stored embeddings for the whole dataset, in MB.",
   fit: "Time to train the classifier, in seconds.",
   cpu: "CPU time spent training, in seconds.\nHigher than the training time when several cores work at once.",
+  cpupct: "How busy the CPU was while training: average / highest, in % of all its threads.\n"
+    + "Average = CPU s ÷ (fit s × threads). Highest = the busiest half-second.\n"
+    + "100% = every thread busy; one busy thread on a 16-thread CPU is about 6%.\n"
+    + "Training process and its helper processes only, so other programs don't count.\n"
+    + "Highest is blank until Measure resources or a new run records it.",
   ram: "Most extra RAM training took, in MB, on top of what was already loaded (Python and the embeddings),\n"
     + "helper processes included. Blank for runs trained before this was recorded, until re-measured.",
   p50: "Median time for the classifier to score one prompt, in milliseconds.",
@@ -1391,7 +1396,6 @@ function renderResources() {
   const n = (x, d) => (typeof x === "number" ? x.toFixed(d) : "—");
   const th = (label, tip, cls = "num") => `<th class="${cls}" data-tip="${esc(tip)}">${label}</th>`;
 
-  // group consecutive rows of one pipeline × embedding: they share the embedding cells
   const groups = [];
   for (const r of rows) {
     const g = groups.at(-1);
@@ -1408,38 +1412,43 @@ function renderResources() {
       const span = g.rows.length > 1 ? ` rowspan="${g.rows.length}"` : "";
       let emb = "";
       if (i === 0) {
-        const gpu = !r.emb_local ? `<td class="num muted"${span} colspan="2" data-tip="${esc(RS_TIP.vram)}">n/a — OpenAI's servers</td>`
-          : `<td class="num"${span}>${n(r.vram_mb, 0)}</td><td class="num"${span}>${
+        const gpu = !r.emb_local ? `<td class="num muted sep"${span} colspan="2" data-tip="${esc(RS_TIP.vram)}">n/a — OpenAI's servers</td>`
+          : `<td class="num sep"${span}>${n(r.vram_mb, 0)}</td><td class="num"${span}>${
               typeof r.gpu_mean === "number" ? `${r.gpu_mean.toFixed(0)} / ${n(r.gpu_max, 0)}` : "—"}</td>`;
         emb = `<td${span} data-tip="${esc(pLabel(r.Pipeline))}">${esc(pShort(r.Pipeline))}</td><td${span}>${esc(r.Embeddings)}</td>
           ${gpu}<td class="num"${span} data-tip="${esc(r.emb_rows ? `${r.emb_rows.toLocaleString()} rows × ${r.emb_dims.toLocaleString()} dimensions` : "")}">${n(r.emb_disk_mb, 1)}</td>`;
       }
       body += `<tr${cls ? ` class="${cls}"` : ""}>${emb}
-        <td class="rs-clf">${esc(CLF_SHORT[r.Classifier] || r.Classifier)}</td>
-        <td class="num">${n(r.fit_s, 1)}</td><td class="num">${n(r.cpu_s, 1)}</td><td class="num">${n(r.ram_mb, 0)}</td>
-        <td class="num">${n(r.p50_ms, 2)}</td><td class="num">${n(r.p99_ms, 2)}</td>
-        <td class="num">${n(r.model_mb, 2)}</td></tr>`;
+        <td class="sep">${esc(CLF_SHORT[r.Classifier] || r.Classifier)}</td>
+        <td class="num sep">${n(r.fit_s, 1)}</td><td class="num">${n(r.cpu_s, 1)}</td><td class="num">${
+          typeof r.cpu_pct === "number" ? `${r.cpu_pct.toFixed(0)} / ${n(r.cpu_peak_pct, 0)}` : "—"}</td>
+        <td class="num">${n(r.ram_mb, 0)}</td>
+        <td class="num sep">${n(r.p50_ms, 2)}</td><td class="num">${n(r.p99_ms, 2)}</td>
+        <td class="num sep">${n(r.model_mb, 2)}</td></tr>`;
     });
     lastPipe = g.rows[0].Pipeline;
   }
 
   $("#rs-table").innerHTML = rows.length ? `<tr class="grp"><th colspan="2"></th>
       <th colspan="3" data-tip="Turning the text into vectors, on the GPU.">Embedding</th>
-      <th colspan="1"></th>
-      <th colspan="3" data-tip="Training the classifier once, on the training rows.">Classifier training</th>
+      <th></th>
+      <th colspan="4" data-tip="Training the classifier once, on the training rows.">Classifier training</th>
       <th colspan="2" data-tip="Scoring one prompt with the trained classifier.">Classifier inference</th>
-      <th colspan="1" data-tip="Saved classifier file.">Disk</th></tr>
+      <th data-tip="Saved classifier file.">Disk</th></tr>
     <tr>${th("Pipeline", COL_TIP.Pipeline, "")}${th("Emb", COL_TIP.Emb, "")}
       ${th("VRAM MB", RS_TIP.vram)}${th("GPU %", RS_TIP.gpu)}${th("disk MB", RS_TIP.embdisk)}
       ${th("Classifier", `${CLF_ABBR}.`, "")}
-      ${th("fit s", RS_TIP.fit)}${th("CPU s", RS_TIP.cpu)}${th("fit RAM MB", RS_TIP.ram)}
+      ${th("fit s", RS_TIP.fit)}${th("CPU s", RS_TIP.cpu)}${th("CPU %", RS_TIP.cpupct)}${th("fit RAM MB", RS_TIP.ram)}
       ${th("p50 ms", RS_TIP.p50)}${th("p99 ms", RS_TIP.p99)}${th("model MB", RS_TIP.model)}</tr>${body}`
     : `<tr><td class="muted">Nothing to show for this selection.</td></tr>`;
 
   const m = RES.machine;
+  const gb = (x) => `${Number(x.toFixed(1))} GB`;
+  const ram = m?.ram_installed_gb ? `${gb(m.ram_installed_gb)} RAM${m.ram_usable_gb ? ` (${gb(m.ram_usable_gb)} usable)` : ""}`
+    : m?.ram_usable_gb ? `${gb(m.ram_usable_gb)} RAM usable` : "";
   const measured = RES.n_embedding || RES.n_classifier;
   $("#rs-key").innerHTML = measured
-    ? `<span>Measured on ${esc([m?.gpu, m?.cpu, m?.ram_gb ? `${m.ram_gb} GB RAM` : ""].filter(Boolean).join(" · "))}${
+    ? `<span>Measured on ${esc([m?.gpu, m?.cpu, ram].filter(Boolean).join(" · "))}${
         RES.measured_at ? `, ${esc(RES.measured_at.slice(0, 10))}` : ""}</span>
        <span>normal mode · classifiers run on the CPU only</span>
        <span>${RES.n_benchmark ? `${RES.n_benchmark} of ${RES.rows.length} rows from Measure resources, the rest from the runs`

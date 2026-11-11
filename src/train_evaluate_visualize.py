@@ -59,20 +59,28 @@ plt.style.use('seaborn-v0_8-whitegrid')
 sns.set_palette("husl")
 
 
-# Polls the training process's RSS from a helper process, so every block gets its own peak: the OS
-# peak never resets on Windows (later classifiers read 0), and a sampler thread in here caused SIGSEGV.
-# The RSS includes the training process's own child processes (the SVM's calibration folds run in
-# joblib workers), not the watcher itself. One stdin line per request: "reset" starts a block at the
-# current RSS, anything else returns the block's peak.
+# Polls the training process's RSS and CPU use from a helper process, so every block gets its own peaks:
+# the OS peak never resets on Windows (later classifiers read 0), and a sampler thread in here caused
+# SIGSEGV. Both include the training process's own child processes (the SVM's calibration folds run in
+# joblib workers), not the watcher itself. RSS is read every 10 ms. CPU use is taken over 0.5 s windows:
+# Windows only advances a process's CPU time about every 15.6 ms, so shorter windows would swing between
+# 0% and 150%. A window's CPU % = CPU seconds used in it / (its length x the CPU's threads). One stdin line
+# per request: "reset" starts a block at the current RSS; anything else returns the block's peaks.
+# Each answer is "<peak RSS bytes> <peak CPU %>"; the CPU % is 0 until a whole window has passed.
 _RAM_WATCH_CODE = r"""
 import os, sys, threading, time, psutil
 p, me, lock = psutil.Process(int(sys.argv[1])), os.getpid(), threading.Lock()
+NCPU, WINDOW = psutil.cpu_count() or 1, 0.5
 peak, kids, scanned = 0, [], 0.0
-def total(rescan=False):
+cpu_last, cpu_t, cpu_peak = {}, None, 0.0
+def procs(rescan=False):
     global kids, scanned
     if rescan or time.monotonic() - scanned > 0.25:   # listing processes is slow; RSS reads are not
         kids = [k for k in p.children(recursive=True) if k.pid != me]
         scanned = time.monotonic()
+    return kids
+def total(rescan=False):
+    kids = procs(rescan)
     t = p.memory_info().rss
     for k in kids:
         try:
@@ -80,12 +88,30 @@ def total(rescan=False):
         except psutil.Error:
             pass
     return t
+def cpu_now():
+    out = {}
+    for q in [p, *procs(rescan=True)]:   # a worker missing from the last window started in this one
+        try:
+            ct = q.cpu_times()
+            out[q.pid] = ct.user + ct.system
+        except psutil.Error:
+            pass
+    return out
+def cpu_window():
+    global cpu_last, cpu_t, cpu_peak
+    if cpu_t is None or time.monotonic() - cpu_t < WINDOW:
+        return
+    cur, now = cpu_now(), time.monotonic()
+    used = sum(t - cpu_last.get(pid, 0.0) for pid, t in cur.items())
+    cpu_peak = max(cpu_peak, min(100.0, 100 * used / ((now - cpu_t) * NCPU)))
+    cpu_last, cpu_t = cur, now
 def poll():
     global peak
     while True:
         with lock:
             try:
                 peak = max(peak, total())
+                cpu_window()
             except psutil.Error:
                 return
         time.sleep(0.01)
@@ -93,8 +119,11 @@ threading.Thread(target=poll, daemon=True).start()
 for line in sys.stdin:
     with lock:
         rss = total(rescan=True)
-        peak = rss if line.strip() == "reset" else max(peak, rss)
-        print(peak, flush=True)
+        if line.strip() == "reset":
+            peak, cpu_last, cpu_t, cpu_peak = rss, cpu_now(), time.monotonic(), 0.0
+        else:
+            peak = max(peak, rss)
+        print(peak, cpu_peak, flush=True)
 """
 
 
@@ -128,10 +157,12 @@ class _RamWatcher:
         self._p = subprocess.Popen([sys.executable, "-c", _RAM_WATCH_CODE, str(os.getpid())],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
-    def ask(self, cmd: str) -> float:
+    def ask(self, cmd: str) -> tuple[float, float]:
+        """(peak RSS in bytes, peak CPU %) of the block so far."""
         self._p.stdin.write(cmd + "\n")
         self._p.stdin.flush()
-        return float(self._p.stdout.readline())   # "" (watcher gone) raises ValueError
+        rss, cpu = self._p.stdout.readline().split()   # "" (watcher gone) raises ValueError
+        return float(rss), float(cpu)
 
 
 _WATCHER: list = []   # started on first use; [None] once it failed to start
@@ -148,20 +179,23 @@ def _ram_watcher() -> _RamWatcher | None:
 
 
 class _ResourceMeter:
-    """Wall time, CPU-seconds and the most RAM a block added on top of what was in use when it started;
-    CPU and RAM include the child processes the block ran its work in."""
+    """Wall time, CPU-seconds, average and highest CPU % (of all the CPU's threads), and the most RAM a
+    block added on top of what was in use when it started; CPU and RAM include the child processes the
+    block ran its work in."""
 
     def __init__(self):
         self._proc = psutil.Process()
         self.wall_seconds = 0.0
         self.cpu_seconds = float("nan")
+        self.cpu_avg_pct = float("nan")
+        self.cpu_peak_pct = float("nan")
         self.ram_mb = float("nan")
 
     def __enter__(self):
         _stop_joblib_workers()
         self._watch = _ram_watcher()
         try:
-            self._rss0 = self._watch.ask("reset") if self._watch else None
+            self._rss0 = self._watch.ask("reset")[0] if self._watch else None
         except (OSError, ValueError):
             self._watch = None
         self._skip = self._watch._p.pid if self._watch else None
@@ -174,9 +208,14 @@ class _ResourceMeter:
         cpu = _cpu_seconds(self._proc, self._skip)
         # workers still alive at the end; the joblib workers stay up until the next block stops them
         self.cpu_seconds = sum(t - self._cpu0.get(pid, 0.0) for pid, t in cpu.items())
+        if self.wall_seconds > 0:
+            self.cpu_avg_pct = 100 * self.cpu_seconds / (self.wall_seconds * (psutil.cpu_count() or 1))
         if self._watch:
             try:
-                self.ram_mb = max(0.0, self._watch.ask("peak") - self._rss0) / 1e6
+                rss, cpu_peak = self._watch.ask("peak")
+                self.ram_mb = max(0.0, rss - self._rss0) / 1e6
+                # a block shorter than one window has no window of its own: its peak is its average
+                self.cpu_peak_pct = max(cpu_peak, self.cpu_avg_pct)
             except (OSError, ValueError):
                 pass
         return False
@@ -236,6 +275,25 @@ def _cpu_name() -> str:
     return platform.processor() or platform.machine()
 
 
+GIB = 1024 ** 3   # the GB Windows and Task Manager show; machine RAM and VRAM sizes use it
+
+
+def _installed_ram_bytes() -> int | None:
+    """RAM fitted in the machine; the OS gets a little less (some is reserved, e.g. for built-in graphics)."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    kb = ctypes.c_ulonglong()
+    return kb.value * 1024 if ctypes.windll.kernel32.GetPhysicallyInstalledSystemMemory(ctypes.byref(kb)) else None
+
+
+def ram_report() -> dict:
+    """Installed and usable RAM in GB of 1024**3 bytes, as Windows puts it: "64.0 GB (61.6 GB usable)"."""
+    installed = _installed_ram_bytes()
+    return {'ram_installed_gb': round(installed / GIB, 1) if installed else None,
+            'ram_usable_gb': round(psutil.virtual_memory().total / GIB, 1)}
+
+
 def environment_report() -> dict:
     """Machine facts the cost columns only mean something against."""
     return {
@@ -245,7 +303,7 @@ def environment_report() -> dict:
         'python': platform.python_version(),
         'cpu_count_logical': psutil.cpu_count(logical=True),
         'cpu_count_physical': psutil.cpu_count(logical=False),
-        'total_ram_gb': round(psutil.virtual_memory().total / 1e9, 2),
+        **ram_report(),
     }
 
 
@@ -375,6 +433,8 @@ def train_evaluate(X_train, y_train, X_test, y_test, classifier, name):
     metrics.update({
         'Train-Time(s)': fit_res.wall_seconds,
         'Train-CPU(s)': fit_res.cpu_seconds,
+        'Train-CPU-Avg(%)': fit_res.cpu_avg_pct,
+        'Train-CPU-Peak(%)': fit_res.cpu_peak_pct,
         'Train-RAM(MB)': fit_res.ram_mb,
         'Inference-Time-Total(s)': infer_res.wall_seconds,
         'Inference-CPU(s)': infer_res.cpu_seconds,

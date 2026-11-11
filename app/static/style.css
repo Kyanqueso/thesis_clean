@@ -822,4 +822,5 @@ h2.fold-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: -2
 /* resources: shared embedding cells span their classifier rows */
 #rs-table td[rowspan] { vertical-align: top; }
 #rs-table tr.grp-top td { border-top: 1px solid var(--border-strong); }
-#rs-table td.rs-clf { border-left: 1px solid var(--border); }
+#rs-table tr.grp th:empty { background: var(--card2); border-bottom: 1px solid var(--border); }
+#rs-table td.sep { border-left: 1px solid var(--border); }

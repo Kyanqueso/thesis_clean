@@ -193,12 +193,30 @@ def master_table(reference: str = "normal") -> dict:
 
 BENCH_FILE = "resource_benchmark.json"
 EMB_LOCAL = {"minilm", "qwen3"}   # run on the GPU; openai runs on OpenAI's servers
-CLF_COST = ("fit_s", "cpu_s", "ram_mb", "p50_ms", "p99_ms", "model_mb")
+CLF_COST = ("fit_s", "cpu_s", "cpu_peak_pct", "ram_mb", "p50_ms", "p99_ms", "model_mb")
 GPU_COST = ("vram_peak_mb", "gpu_util_mean", "gpu_util_max")
 
 
 def _mb(p: Path) -> float | None:
     return round(p.stat().st_size / 1e6, 3) if p.is_file() else None
+
+
+def _cpu_pct(cpu_s, fit_s, threads) -> float | None:
+    """Average share of all the CPU's threads busy during a fit: CPU seconds / (wall seconds x threads)."""
+    if cpu_s is None or not fit_s or not threads:
+        return None
+    return round(100 * cpu_s / (fit_s * threads), 1)
+
+
+def _ram_gb(env: dict, bm: dict) -> tuple[float | None, float | None]:
+    """(installed, usable) RAM in GB of 1024**3 bytes. Files written before these were recorded hold only
+    total_ram_gb / ram_gb: usable RAM in GB of 10**9 bytes (66.16 for 61.6), converted here."""
+    installed = env.get("ram_installed_gb") or bm.get("ram_installed_gb")
+    usable = env.get("ram_usable_gb") or bm.get("ram_usable_gb")
+    old = env.get("total_ram_gb") or bm.get("ram_gb")
+    if usable is None and old:
+        usable = round(old * 1e9 / 1024 ** 3, 1)
+    return installed, usable
 
 
 def _read_json(p: Path) -> dict:
@@ -252,7 +270,8 @@ def resources() -> dict:
 
         c = clf_b.get(f"{pipeline}|{emb}|{clf}") or {}
         run_cost = {"fit_s": r.get("Train-Time(s)"), "cpu_s": r.get("Train-CPU(s)"),
-                    "ram_mb": r.get("Train-RAM(MB)"),   # older runs have no such column
+                    # older runs have no such columns
+                    "cpu_peak_pct": r.get("Train-CPU-Peak(%)"), "ram_mb": r.get("Train-RAM(MB)"),
                     "p50_ms": r.get("Latency-P50(ms)"), "p99_ms": r.get("Latency-P99(ms)"),
                     "model_mb": _mb(d / "models" / f"{emb}_{clf}.joblib"),
                     "at": metas[pipeline].get("finished_at")}
@@ -260,6 +279,10 @@ def resources() -> dict:
         cost, clf_src, clf_at = _newer(run_cost, {**c, "at": c.get("measured_at")}, CLF_COST)
         if clf_at:
             stamps.append(clf_at)
+        run_threads = (metas[pipeline].get("environment") or {}).get("cpu_count_logical")
+        bench_threads = (bench.get("machine") or {}).get("cpu_threads")
+        threads = (bench_threads or run_threads) if clf_src == "benchmark" else (run_threads or bench_threads)
+        cost["cpu_pct"] = _cpu_pct(cost["cpu_s"], cost["fit_s"], threads)
         rows.append({
             "Pipeline": pipeline, "Embeddings": emb.upper(), "Classifier": clf,
             "emb_local": emb in EMB_LOCAL,
@@ -272,8 +295,9 @@ def resources() -> dict:
 
     env = next((m["environment"] for m in metas.values() if m.get("environment")), {})
     bm = bench.get("machine") or {}
+    ram_installed, ram_usable = _ram_gb(env, bm)
     machine = {"cpu": bm.get("cpu") or env.get("cpu") or env.get("processor"),
-               "ram_gb": env.get("total_ram_gb") or bm.get("ram_gb"),
+               "ram_installed_gb": ram_installed, "ram_usable_gb": ram_usable,
                "gpu": next((dev for *_, dev in emb_info.values() if dev), None) or bm.get("gpu")}
     return {"rows": rows, "machine": machine, "measured_at": max(stamps) if stamps else None,
             "n_embedding": sum(v[3] is not None for v in emb_info.values()),

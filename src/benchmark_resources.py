@@ -56,24 +56,18 @@ def _peak_rss_mb() -> float:
 
 
 def machine_report() -> dict:
-    out = {"cpu": platform.processor() or platform.machine(),
+    import train_evaluate_visualize as tev   # the same machine facts the training runs record
+    out = {"cpu": tev._cpu_name(),
            "cpu_cores": psutil.cpu_count(logical=False),
            "cpu_threads": psutil.cpu_count(logical=True),
-           "ram_gb": round(psutil.virtual_memory().total / 1e9, 1),
+           **tev.ram_report(),
            "os": platform.platform(terse=True)}
-    if sys.platform == "win32":
-        try:   # platform.processor() is only a family code on Windows
-            import winreg
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
-            out["cpu"] = winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
-        except OSError:
-            pass
     try:
         import torch
         if torch.cuda.is_available():
             p = torch.cuda.get_device_properties(0)
             out["gpu"] = p.name
-            out["gpu_vram_gb"] = round(p.total_memory / 1e9, 1)
+            out["gpu_vram_gb"] = round(p.total_memory / tev.GIB, 1)
     except Exception:
         pass
     return out
@@ -169,6 +163,8 @@ def worker_classify(emb_file: Path, split_file: Path, clf_name: str, out_file: P
 
     out = {"fit_s": fit.wall_seconds,
            "cpu_s": fit.cpu_seconds,
+           "cpu_avg_pct": fit.cpu_avg_pct,
+           "cpu_peak_pct": fit.cpu_peak_pct,
            "ram_mb": fit.ram_mb,
            "process_peak_ram_mb": _peak_rss_mb(),
            "p50_ms": lat.get("Latency-P50(ms)"),
@@ -240,7 +236,8 @@ def main() -> int:
                    else list(tev.get_classifiers()))
 
     machine = machine_report()
-    print(f"Machine: {machine.get('cpu')}, {machine.get('ram_gb')} GB RAM, "
+    print(f"Machine: {machine.get('cpu')}, {machine.get('ram_installed_gb')} GB RAM "
+          f"({machine.get('ram_usable_gb')} GB usable), "
           f"{machine.get('gpu', 'no CUDA GPU')}")
     data = _load(OUT_FILE)
     data["machine"] = machine
@@ -306,7 +303,8 @@ def main() -> int:
                             data["classifier"][f"{pipe}|{m}|{clf}"] = {**res, "measured_at": stamp,
                                                                        "machine": machine}
                             _save(data)
-                            print(f"    fit {res['fit_s']:.1f}s, CPU {res['cpu_s']:.1f}s, "
+                            print(f"    fit {res['fit_s']:.1f}s, CPU {res['cpu_s']:.1f}s "
+                                  f"({res['cpu_avg_pct']:.0f}% average, {res['cpu_peak_pct']:.0f}% highest), "
                                   f"fit RAM {res['ram_mb']:.0f} MB, p50 {res['p50_ms']:.2f} ms")
 
     print(f"\nSaved to {OUT_FILE}")

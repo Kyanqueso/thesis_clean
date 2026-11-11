@@ -103,11 +103,14 @@ def test_resources_read_from_the_runs():
             for sub in ("results", "embeddings", "models"):
                 (run / sub).mkdir(parents=True)
             (run / "results" / "full_evaluation_results.csv").write_text(
-                "Embeddings,Classifier,Train-Time(s),Train-CPU(s),Train-RAM(MB),Latency-P50(ms),Latency-P99(ms)\n"
-                "MINILM,SVM,12.5,3.0,210.0,0.7,1.1\n"
-                "OPENAI,SVM,15.0,4.0,,0.8,1.2\n", encoding="utf-8")
+                "Embeddings,Classifier,Train-Time(s),Train-CPU(s),Train-CPU-Peak(%),Train-RAM(MB),"
+                "Latency-P50(ms),Latency-P99(ms)\n"
+                "MINILM,SVM,12.5,3.0,40.0,210.0,0.7,1.1\n"
+                "OPENAI,SVM,15.0,4.0,,,0.8,1.2\n", encoding="utf-8")
+            # an older run_meta: RAM only as total_ram_gb, in GB of 10**9 bytes
             (run / "results" / "run_meta.json").write_text(json.dumps(
-                {"environment": {"cpu": "Test CPU", "total_ram_gb": 64}, "finished_at": "2026-11-07T23:00:00"}))
+                {"environment": {"cpu": "Test CPU", "total_ram_gb": 64, "cpu_count_logical": 16},
+                 "finished_at": "2026-11-07T23:00:00"}))
             np.save(run / "embeddings" / "minilm_prompt.npy", np.zeros((10, 4), np.float32))
             (run / "embeddings" / "minilm_gpu.json").write_text(json.dumps(
                 {"device": "Test GPU", "vram_peak_mb": 1017.0, "gpu_util_mean": 47.8, "gpu_util_max": 99.0}))
@@ -118,7 +121,12 @@ def test_resources_read_from_the_runs():
             assert (mini["fit_s"], mini["cpu_s"], mini["ram_mb"], mini["p99_ms"]) == (12.5, 3.0, 210.0, 1.1)
             assert (mini["vram_mb"], mini["gpu_mean"], mini["model_mb"], mini["emb_rows"]) == (1017.0, 47.8, 2.0, 10)
             assert oai["ram_mb"] is None and oai["vram_mb"] is None and oai["model_mb"] is None
-            assert res["machine"] == {"cpu": "Test CPU", "ram_gb": 64, "gpu": "Test GPU"}
+            # average CPU = CPU s / (fit s x 16 threads)
+            assert (mini["cpu_pct"], oai["cpu_pct"]) == (1.5, 1.7)
+            assert (mini["cpu_peak_pct"], oai["cpu_peak_pct"]) == (40.0, None)   # highest: as recorded
+            # 64 x 10**9 bytes is 59.6 GB in Windows' units; installed RAM was not recorded back then
+            assert res["machine"] == {"cpu": "Test CPU", "ram_installed_gb": None, "ram_usable_gb": 59.6,
+                                      "gpu": "Test GPU"}
             assert (res["n_embedding"], res["n_classifier"], res["n_benchmark"]) == (1, 2, 0)
 
             # Measure resources ran later: its numbers win, and its blanks are filled from the run
@@ -128,8 +136,16 @@ def test_resources_read_from_the_runs():
             }}))
             mini, oai = runs.resources()["rows"]
             assert (mini["fit_s"], mini["cpu_s"], mini["ram_mb"], mini["clf_src"]) == (9.0, 8.0, 210.0, "benchmark")
+            assert mini["cpu_pct"] == 5.6     # from the benchmark's own fit and CPU seconds
             # an older benchmark loses to the run, but still fills what the run lacks
             assert (oai["fit_s"], oai["ram_mb"], oai["clf_src"]) == (15.0, 99.0, "run")
+
+            # a current run_meta records both, already in Windows' units
+            (run / "results" / "run_meta.json").write_text(json.dumps(
+                {"environment": {"cpu": "Test CPU", "ram_installed_gb": 64.0, "ram_usable_gb": 61.6,
+                                 "cpu_count_logical": 16}, "finished_at": "2026-11-07T23:00:00"}))
+            m = runs.resources()["machine"]
+            assert (m["ram_installed_gb"], m["ram_usable_gb"]) == (64.0, 61.6)
         finally:
             paths.RUNS_DIR = real
 
