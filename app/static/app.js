@@ -105,6 +105,7 @@ function renderVerdicts() {
     <div class="v-nums">
       ${verdictRow(v, "normal", "normal")}
       ${verdictRow(v, "user_intent_only", "intent-only")}
+      ${verdictRow(v, "context_only", "context-only")}
     </div>
     <div class="v-why muted">${VERDICT_NOTE[v.verdict]}</div>
   </div>`).join("");
@@ -840,7 +841,7 @@ function pTitle(p, sig) {
 function renderMaster() {
   if (!MASTER) return;
   const metric = $("#ms-metric").value || "ROC-AUC";
-  const rows = masterRows();
+  const rows = sortByPipeline(masterRows(), MS_SORT);
 
   /* Delivered runs predate several metrics, so whole column groups arrive empty.
      An em-dash grid reads as a broken table; drop what has no data anywhere. */
@@ -858,7 +859,8 @@ function renderMaster() {
   const ref = MASTER.reference;
   const refName = MODE_SHORT[ref];
   const tipAttr = (tip) => ` data-tip="${esc(tip)}"`;
-  const th = (label, tip, cls = "") => `<th${cls ? ` class="${cls}"` : ""}${tipAttr(tip)}>${label}</th>`;
+  const th = (label, tip, cls = "", key = label) =>
+    `<th${cls ? ` class="${cls}"` : ""} data-sort="${esc(key)}"${tipAttr(tip)}>${label}${sortArrow(MS_SORT, key)}</th>`;
   const clfTip = ($("#ms-collapse").value === "best"
     ? `The classifier with the best ROC-AUC in the ${refName} run, for this pipeline × embedding.`
     : "Each classifier trained on these embeddings, one row each.") + `\n${CLF_ABBR}.`;
@@ -876,11 +878,11 @@ function renderMaster() {
       `How much ${metric} drops when part of the input is removed: ${refName} − ablated, in percentage points.\n`
       + `Positive = removing it hurt.\n${SIG_NOTE}`)}
     </tr>`;
-  head += `<tr>${th("Pipeline", COL_TIP.Pipeline)}${th("Emb", COL_TIP.Emb)}${th("Classifier", clfTip)}
-    ${q.map((m) => th(qShort[m], COL_TIP[m], "num")).join("")}
+  head += `<tr>${th("Pipeline", COL_TIP.Pipeline)}${th("Emb", COL_TIP.Emb, "", "Embeddings")}${th("Classifier", clfTip)}
+    ${q.map((m) => th(qShort[m], COL_TIP[m], "num", m)).join("")}
     ${errs.map((e) => th(e, COL_TIP[e], "num")).join("")}
-    ${lowFpr.map(([k, l]) => th(l, COL_TIP[k], "num")).join("")}
-    ${degVars.map((v) => th(`→${MODE_SHORT[v]}`, deltaTip(v, ref), "num")).join("")}
+    ${lowFpr.map(([k, l]) => th(l, COL_TIP[k], "num", k)).join("")}
+    ${degVars.map((v) => th(`→${MODE_SHORT[v]}`, deltaTip(v, ref), "num", `Deg:${v}:${metric}`)).join("")}
     </tr>`;
 
   let body = "", lastPipe = null;
@@ -908,7 +910,8 @@ function renderMaster() {
     ${degVars.includes("user_intent_only") && ref === "normal"
       ? `<span><b class="key-bad">red</b> = intent-only Δ ≤ 0.5 pp: the intent alone is enough → shortcut</span>` : ""}
     <span><span class="ns">ns</span> = not significant (McNemar, Holm, p ≥ 0.05)</span>
-    <span class="key-hint">hover a header or a Δ for details</span>` : "";
+    <span class="key-hint">hover a header or a Δ for details · ${SORT_HINT}</span>`
+    : `<span class="key-hint">${SORT_HINT}</span>`;
 
   const notes = MASTER.notes || [];
   $("#master-notes").innerHTML = notes.length
@@ -923,10 +926,13 @@ function masterCSV() {
   const t = $("#master-table");
   return Array.from(t.rows).map((tr) =>
     Array.from(tr.cells).map((td) => {
-      const v = td.textContent.trim().replace(/\s+/g, " ");
+      const v = td.textContent.trim().replace(/\s+/g, " ").replace(/ [▲▼]$/, "");
       return /[",]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
     }).join(",")).join("\n");
 }
+
+const MS_SORT = { col: null, dir: 0 };
+onSortClick("#master-table", MS_SORT, renderMaster);
 
 ["#ms-metric", "#ms-collapse"].forEach((id) =>
   $(id).addEventListener("change", renderMaster));
@@ -1191,7 +1197,42 @@ const RF_TIP = {
   "Inference-Time-per-Sample(ms)": "Total inference time on the test set ÷ number of rows, in microseconds.",
 };
 const RF_METRICS = [["ROC-AUC", "ROC-AUC"], ["PR-AUC", "PR-AUC"], ["F1-Score", "F1"], ["Accuracy", "Acc"]];
-let sortCol = "ROC-AUC", sortAsc = false;
+const RF_SORT = { col: null, dir: 0 };
+
+/* Header-click sorting shared by Master results, All runs and Resources used.
+   Each click on the same header steps descending → ascending → back to the
+   table's own order. Rows stay grouped by pipeline; blanks always sort last. */
+function stepSort(s, key) {
+  if (s.col !== key) { s.col = key; s.dir = -1; }
+  else if (s.dir === -1) s.dir = 1;
+  else { s.col = null; s.dir = 0; }
+}
+
+function sortByPipeline(rows, s) {
+  const order = (r) => ALL_PIPES.indexOf(r.Pipeline);
+  const blank = (v) => v === null || v === undefined || v === "";
+  return rows.map((r, i) => [r, i]).sort(([a, i], [b, j]) => {
+    const g = order(a) - order(b);
+    if (s.col === "Pipeline") return s.dir * g || i - j;
+    if (g || !s.col) return g || i - j;
+    const av = a[s.col], bv = b[s.col];
+    if (blank(av) || blank(bv)) return blank(av) - blank(bv) || i - j;
+    const c = typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv));
+    return s.dir * c || i - j;
+  }).map(([r]) => r);
+}
+
+const sortArrow = (s, key) => (s.col === key ? (s.dir < 0 ? " ▼" : " ▲") : "");
+const SORT_HINT = "click a header to sort: descending, ascending, then back to default · rows stay grouped by pipeline";
+
+function onSortClick(box, s, render) {
+  $(box).addEventListener("click", (e) => {
+    const th = e.target.closest("th[data-sort]");
+    if (!th) return;
+    stepSort(s, th.dataset.sort);
+    render();
+  });
+}
 
 /* the classifier Master results shows per pipeline × embedding: best normal ROC-AUC,
    ties to the first name alphabetically, as the table does */
@@ -1259,19 +1300,11 @@ function renderResultsTable() {
   }
   $("#rf-count").textContent = `${rows.length} of ${inFocus.length} rows`;
 
-  const order = (r) => ALL_PIPES.indexOf(r.Pipeline);
-  const sorted = rows.slice().sort((a, b) => {
-    const g = order(a) - order(b);
-    if (g) return g;
-    const av = a[sortCol], bv = b[sortCol];
-    const c = typeof av === "number" ? av - bv : String(av).localeCompare(String(bv));
-    return sortAsc ? c : -c;
-  });
+  const sorted = sortByPipeline(rows, RF_SORT);
 
   const header = RF_COLS.map(([k, label, d]) => {
     const tip = RF_TIP[k] || COL_TIP[k] || COL_TIP[label] || "";
-    const arrow = sortCol === k ? (sortAsc ? " ▲" : " ▼") : "";
-    return `<th class="${d !== undefined ? "num" : ""}" data-sort="${k}"${tip ? ` data-tip="${esc(tip)}"` : ""}>${label}${arrow}</th>`;
+    return `<th class="${d !== undefined ? "num" : ""}" data-sort="${k}"${tip ? ` data-tip="${esc(tip)}"` : ""}>${label}${sortArrow(RF_SORT, k)}</th>`;
   }).join("");
 
   let body = "", lastPipe = null;
@@ -1294,13 +1327,9 @@ function renderResultsTable() {
 
   $("#rf-body").innerHTML = `<div class="scroll"><table id="results-table">${`<tr>${header}</tr>`}${body}</table></div>
     <div class="key"><span><i class="key-edge"></i>blue edge = the classifier Master results shows for that pipeline × embedding</span>
-      <span class="key-hint">click a header to sort · rows stay grouped by pipeline</span></div>`;
-  $$("#results-table [data-sort]").forEach((th) => th.addEventListener("click", () => {
-    const c = th.dataset.sort;
-    if (sortCol === c) sortAsc = !sortAsc; else { sortCol = c; sortAsc = false; }
-    renderResultsTable();
-  }));
+      <span class="key-hint">${SORT_HINT}</span></div>`;
 }
+onSortClick("#rf-body", RF_SORT, renderResultsTable);
 
 /* One classifier × embedding grid per pipeline, shaded from 0.50 (chance, faint)
    to 1.00 (full) — the same anchor as the ablation chart — so the strongest
@@ -1349,6 +1378,8 @@ function renderRfHeat(rows, picks) {
    that embedding, so they span the group's rows. */
 let RES = null;
 const RS = { rows: "best" };
+const RS_SORT = { col: null, dir: 0 };
+onSortClick("#rs-table", RS_SORT, renderResources);
 
 const RS_TIP = {
   vram: "Most GPU memory PyTorch held while embedding (the whole dataset in a run, 1,000 prompts in "
@@ -1393,8 +1424,10 @@ function renderResources() {
   const picks = masterPicks();
   let rows = RES.rows.filter((r) => PIPE_FOCUS.has(r.Pipeline));
   if (RS.rows === "best") rows = rows.filter((r) => picks.has(`${r.Pipeline}|${r.Embeddings}|${r.Classifier}`));
+  rows = sortByPipeline(rows, RS_SORT);
   const n = (x, d) => (typeof x === "number" ? x.toFixed(d) : "—");
-  const th = (label, tip, cls = "num") => `<th class="${cls}" data-tip="${esc(tip)}">${label}</th>`;
+  const th = (label, tip, key, cls = "num") =>
+    `<th class="${cls}" data-sort="${key}" data-tip="${esc(tip)}">${label}${sortArrow(RS_SORT, key)}</th>`;
 
   const groups = [];
   for (const r of rows) {
@@ -1435,11 +1468,11 @@ function renderResources() {
       <th colspan="4" data-tip="Training the classifier once, on the training rows.">Classifier training</th>
       <th colspan="2" data-tip="Scoring one prompt with the trained classifier.">Classifier inference</th>
       <th data-tip="Saved classifier file.">Disk</th></tr>
-    <tr>${th("Pipeline", COL_TIP.Pipeline, "")}${th("Emb", COL_TIP.Emb, "")}
-      ${th("VRAM MB", RS_TIP.vram)}${th("GPU %", RS_TIP.gpu)}${th("disk MB", RS_TIP.embdisk)}
-      ${th("Classifier", `${CLF_ABBR}.`, "")}
-      ${th("fit s", RS_TIP.fit)}${th("CPU s", RS_TIP.cpu)}${th("CPU %", RS_TIP.cpupct)}${th("fit RAM MB", RS_TIP.ram)}
-      ${th("p50 ms", RS_TIP.p50)}${th("p99 ms", RS_TIP.p99)}${th("model MB", RS_TIP.model)}</tr>${body}`
+    <tr>${th("Pipeline", COL_TIP.Pipeline, "Pipeline", "")}${th("Emb", COL_TIP.Emb, "Embeddings", "")}
+      ${th("VRAM MB", RS_TIP.vram, "vram_mb")}${th("GPU %", RS_TIP.gpu, "gpu_mean")}${th("disk MB", RS_TIP.embdisk, "emb_disk_mb")}
+      ${th("Classifier", `${CLF_ABBR}.`, "Classifier", "")}
+      ${th("fit s", RS_TIP.fit, "fit_s")}${th("CPU s", RS_TIP.cpu, "cpu_s")}${th("CPU %", RS_TIP.cpupct, "cpu_pct")}${th("fit RAM MB", RS_TIP.ram, "ram_mb")}
+      ${th("p50 ms", RS_TIP.p50, "p50_ms")}${th("p99 ms", RS_TIP.p99, "p99_ms")}${th("model MB", RS_TIP.model, "model_mb")}</tr>${body}`
     : `<tr><td class="muted">Nothing to show for this selection.</td></tr>`;
 
   const m = RES.machine;
@@ -1453,7 +1486,8 @@ function renderResources() {
        <span>normal mode · classifiers run on the CPU only</span>
        <span>${RES.n_benchmark ? `${RES.n_benchmark} of ${RES.rows.length} rows from Measure resources, the rest from the runs`
          : "from the runs"} · the newer measurement is shown</span>
-       ${RS.rows === "all" ? `<span><i class="key-edge"></i>blue edge = the classifier Master results shows</span>` : ""}`
+       ${RS.rows === "all" ? `<span><i class="key-edge"></i>blue edge = the classifier Master results shows</span>` : ""}
+       <span class="key-hint">${SORT_HINT}</span>`
     : `<span>Not measured yet: only the disk sizes are filled in. Re-run from the Run tab, or use
        Run → Measure resources.</span>`;
 }
