@@ -1,21 +1,4 @@
-"""Resource benchmark for the dashboard's Resources section: run it on the benchmark PC.
-
-Measures, for the normal-mode runs of each pipeline:
-  embedding stage  (local models only)  peak VRAM and GPU utilisation while embedding a
-                                        sample of prompts on the GPU
-  classifier stage (every embedding)    training time, CPU time, fit RAM, single-prompt
-                                        latency and the saved model's size
-
-The training run (train_evaluate_visualize.py) and generate_embeddings.py measure the same
-things as they go; this re-measures them on their own, one fresh subprocess per measurement,
-with nothing else running. Time, CPU and fit RAM use the training run's own meter, so the two
-sources mean the same thing; the dashboard shows whichever is newer.
-
-Results merge into <runs>/resource_benchmark.json; re-running one part keeps the rest.
-
-    venv\\Scripts\\python.exe src\\benchmark_resources.py
-    venv\\Scripts\\python.exe src\\benchmark_resources.py --pipelines pipeline3_organic_injected --stages classify
-"""
+"""Re-measure training and embedding cost for the dashboard's Resources section."""
 
 import argparse
 import json
@@ -37,7 +20,7 @@ sys.path.insert(0, str(ROOT_DIR))
 from pipeline_paths import DATA_DIR, DATASETS, RUNS_DIR  # noqa: E402
 import progress  # noqa: E402  (src/progress.py: the marker lines the dashboard's bars read)
 
-OUT_FILE = RUNS_DIR / "resource_benchmark.json"
+OUT_FILE = RUNS_DIR / "resource_benchmark.json"   # results merge in, so re-running one part keeps the rest
 LOCAL_MODELS = ("minilm", "qwen3")      # run on this machine's GPU; openai runs on OpenAI's servers
 ALL_MODELS = ("minilm", "openai", "qwen3")
 SAMPLE_SEED = 42
@@ -84,16 +67,17 @@ class _GpuSampler(threading.Thread):
         pynvml.nvmlInit()
         self._nvml = pynvml
         self._h = pynvml.nvmlDeviceGetHandleByIndex(0)
-        self._stop = threading.Event()
+        # not "_stop": that name would hide threading.Thread._stop, which join() calls
+        self._halt = threading.Event()
         self.util = []
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             self.util.append(self._nvml.nvmlDeviceGetUtilizationRates(self._h).gpu)
             time.sleep(GPU_POLL_S)
 
     def stop(self):
-        self._stop.set()
+        self._halt.set()
         self.join()
 
 
