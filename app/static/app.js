@@ -30,6 +30,7 @@ function renderPipeChips() {
     renderResultsTable();
     renderResources();
     renderFigPicker();
+    renderExtras();
   }));
 }
 const focusedResults = () => RESULTS.filter((r) => PIPE_FOCUS.has(r.Pipeline));
@@ -179,7 +180,8 @@ $$(".tab-btn").forEach((b) => b.addEventListener("click", () => {
    Jump links in the sticky header, shown on the Analysis tab only. The section
    currently under the header is highlighted as the page scrolls, and links to
    cards that are hidden (no results yet) are hidden with them. */
-const SEC_IDS = ["master-card", "ablation-card", "allrows-card", "resources-card", "figures-card"];
+const SEC_IDS = ["master-card", "ablation-card", "allrows-card", "resources-card", "figures-card",
+  "mcnemar-card", "e2e-card", "ece-card", "disk-card", "dup-card"];
 const PAGE_HEADER = $("body > header");
 
 // the header's real height, so a jump lands just below it instead of under it
@@ -704,8 +706,7 @@ async function loadResults() {
   try { RESULTS = (await fetchJSON("/api/results")).rows; } catch { RESULTS = []; }
   const empty = !RESULTS.length;
   $("#no-results-card").style.display = empty ? "" : "none";
-  for (const id of ["#master-card", "#ablation-card", "#allrows-card", "#resources-card", "#figures-card"])
-    $(id).style.display = empty ? "none" : "";
+  for (const id of SEC_IDS) $(`#${id}`).style.display = empty ? "none" : "";
   updateSecNav();
   if (empty) return;
   renderVerdicts();
@@ -715,6 +716,7 @@ async function loadResults() {
   renderResultsTable();
   loadResources();
   renderFigPicker();
+  loadExtras();
   updateSecNav();
 }
 
@@ -1486,10 +1488,208 @@ function renderResources() {
        Run → Measure resources.</span>`;
 }
 
+/* ---------- extra analysis cards ----------
+   McNemar (within run and across modes), end-to-end latency, ECE, disk usage and
+   train/test overlap, from /api/extras. One renderer drives all five: each card
+   has pick chips, a sortable table and a key line. Parked at the end of the tab
+   for now; they get regrouped per SOP later. */
+let EX = null;
+const EX_ALPHA = 0.05;
+const EX_STATE = {
+  "mcnemar-card": { view: "within", mode: "normal", show: "all", sort: { col: null, dir: 0 } },
+  "e2e-card": { sort: { col: null, dir: 0 } },
+  "ece-card": { mode: "normal", sort: { col: null, dir: 0 } },
+  "disk-card": { mode: "normal", kind: "all", sort: { col: null, dir: 0 } },
+  "dup-card": { sort: { col: null, dir: 0 } },
+};
+
+// p underflows to exactly 0 at n≈14k; say so instead of printing "0"
+const pFmt = (p) => (typeof p !== "number" ? "—" : p === 0 ? "< 1e-300" : p < 1e-4 ? p.toExponential(1) : p.toFixed(4));
+const nFmt = (d) => (x) => (typeof x === "number" ? x.toFixed(d) : "—");
+const intFmt = (x) => (typeof x === "number" ? x.toLocaleString() : "—");
+const pctFmt = (x) => (typeof x === "number" ? `${(x * 100).toFixed(2)}%` : "—");
+const ppFmt = (x) => (typeof x === "number" ? `${x >= 0 ? "+" : ""}${(x * 100).toFixed(2)}` : "—");
+const sigFmt = (x) => (x === true ? "yes" : x === false ? `<span class="ns">ns</span>` : "—");
+const modelFmt = (s) => { const [e, c] = String(s).split("__"); return esc(`${e.toUpperCase()} · ${CLF_SHORT[c] || c}`); };
+const clfFmt = (c) => esc(CLF_SHORT[c] || c);
+const modeFmt = (m) => esc(MODE_SHORT[m] || m);
+
+const EX_MODE_CHIPS = ["normal", "user_intent_only", "context_only"].map((m) => [m, MODE_SHORT[m], MODE_DESC[m]]);
+const EX_SIG_TIP = `Holm-corrected p below ${EX_ALPHA}: the two models (or modes) get different rows right more often than chance allows.`;
+const EX_P = [
+  ["p", "p_value", "Raw McNemar p, before correcting for the number of tests in this family.", pFmt],
+  ["p (Holm)", "p_holm", "p after the Holm–Bonferroni step-down correction across every test in this family.\n"
+    + "This is the one to compare against α = 0.05.", pFmt],
+  ["sig.", "significant", EX_SIG_TIP, sigFmt],
+];
+const EX_BC = [
+  ["b", "b", "Test rows model A got right and model B got wrong.", intFmt],
+  ["c", "c", "Test rows model B got right and model A got wrong.", intFmt],
+  ["test", "method", "chi2_continuity = chi-square with Yates' correction; exact = binomial test, used when b + c ≤ 25.", (x) => esc(x ?? "—")],
+];
+
+// card id -> { picks: [[state key, label, [[value, text, tip]]]], rows, cols: [[header, field, tip, fmt]], key }
+const EX_CARDS = {
+  "mcnemar-card": (s) => {
+    const within = s.view === "within";
+    let rows = (within ? EX.within.filter((r) => r.Mode === s.mode) : EX.ablation)
+      .filter((r) => PIPE_FOCUS.has(r.Pipeline));
+    const nAll = rows.length, nSig = rows.filter((r) => r.significant).length;
+    if (s.show !== "all") rows = rows.filter((r) => !!r.significant === (s.show === "sig"));
+    const acc = [
+      ["acc A", "Acc-A", "Accuracy of A at the 0.5 threshold.", nFmt(4)],
+      ["acc B", "Acc-B", "Accuracy of B at the 0.5 threshold.", nFmt(4)],
+      ["Δ pp", "Acc-Diff(A-B)", "Accuracy of A − accuracy of B, in percentage points.", ppFmt],
+    ];
+    return {
+      picks: [
+        ["view", "Compare", [["within", "model vs model", "Every pair of embedding × classifier, scored on the same test rows of one run (mcnemar_within_run.csv)."],
+                             ["ablation", "mode vs mode", "The same embedding × classifier across the normal / intent-only / context-only runs (ablation_mcnemar.csv)."]]],
+        ...(within ? [["mode", "Mode", EX_MODE_CHIPS]] : []),
+        ["show", "Show", [["all", "all", ""], ["sig", "significant", EX_SIG_TIP], ["ns", "not significant", ""]]],
+      ],
+      rows,
+      cols: [["Pipeline", "Pipeline", COL_TIP.Pipeline],
+        ...(within
+          ? [["model A", "Model-A", "Embedding · classifier.", modelFmt], ["model B", "Model-B", "Embedding · classifier.", modelFmt]]
+          : [["Emb", "Embeddings", COL_TIP.Emb], ["Classifier", "Classifier", CLF_ABBR, clfFmt],
+             ["mode A", "Mode-A", "", modeFmt], ["mode B", "Mode-B", "", modeFmt]]),
+        ...acc, ...EX_BC, ...EX_P],
+      key: `<span>${nAll.toLocaleString()} tests in view · ${nSig.toLocaleString()} significant at Holm α = ${EX_ALPHA}</span>
+        <span>Holm family = ${within ? "all model pairs within one run" : "all mode pairs within one pipeline"}</span>
+        <span>McNemar tests accuracy at the 0.5 threshold on paired test rows</span>`,
+    };
+  },
+
+  "e2e-card": () => {
+    const m = EX.e2e_meta || {};
+    const devs = Object.entries(m.embeddings || {}).map(([e, v]) =>
+      `${e.toUpperCase()}: ${v.error ? `not timed — ${v.error.split(" - ")[0]}` : `${v.device}, loaded in ${v.load_s} s`}`);
+    const mc = m.machine || {};
+    const ms = (label, field, tip) => [label, field, tip, nFmt(2)];
+    return {
+      picks: [],
+      rows: EX.e2e,
+      cols: [["Emb", "Embedding", COL_TIP.Emb], ["Classifier", "Classifier", CLF_ABBR, clfFmt],
+        ["requests", "Requests", "Timed requests, after the warm-up ones.", intFmt],
+        ms("embed p50", "Embed-P50(ms)", "Median time to embed one prompt, in ms. OpenAI includes the network round trip."),
+        ms("classify p50", "Classify-P50(ms)", "Median time for the classifier to score one embedded prompt, in ms."),
+        ms("E2E p50", "E2E-P50(ms)", "Median end-to-end time for one request (embed + classify), in ms."),
+        ms("E2E p95", "E2E-P95(ms)", "95th-percentile end-to-end time, in ms."),
+        ms("E2E p99", "E2E-P99(ms)", "99th-percentile end-to-end time: the slow tail, in ms."),
+        ms("E2E mean", "E2E-Mean(ms)", "Mean end-to-end time, in ms."),
+        ms("E2E max", "E2E-Max(ms)", "Slowest single request, in ms."),
+        ["max |Δp|", "Max-Prob-Diff", "Largest gap between the live probability and the one stored by the training run for the same row.\n"
+          + "Near 0 = the live path reproduces training exactly.", (x) => (typeof x === "number" ? x.toExponential(1) : "—")]],
+      key: EX.e2e.length
+        ? `<span>${m.pipeline ? `${esc(pShort(m.pipeline))} · ${esc(MODE_SHORT[m.mode] || m.mode)} only` : ""} · ${intFmt(m.n_timed)} requests
+             (+${intFmt(m.n_warmup)} warm-up), batch size ${m.batch_size ?? 1}, half benign / half malicious test rows</span>
+           <span>${esc([mc.gpu, mc.processor].filter(Boolean).join(" · "))}${m.measured_at ? `, ${esc(m.measured_at.slice(0, 10))}` : ""}</span>
+           ${devs.map((d) => `<span>${esc(d)}</span>`).join("")}
+           <span>does not follow the P1 / P2 / P3 filter</span>`
+        : `<span>No runs/analysis/end_to_end_latency.csv yet: run <code>src/end_to_end_latency.py</code>.</span>`,
+    };
+  },
+
+  "ece-card": (s) => ({
+    picks: [["mode", "Mode", EX_MODE_CHIPS]],
+    rows: EX.ece.filter((r) => r.Mode === s.mode && PIPE_FOCUS.has(r.Pipeline)),
+    cols: [["Pipeline", "Pipeline", COL_TIP.Pipeline], ["Emb", "Embeddings", COL_TIP.Emb], ["Classifier", "Classifier", CLF_ABBR, clfFmt],
+      ["ECE", "ECE", "Expected calibration error: the size-weighted average gap between confidence and accuracy over "
+        + "10 equal-width confidence bins.\nConfidence = max(p, 1 − p). 0 = perfectly calibrated; lower is better.", nFmt(4)],
+      ["acc @0.5", "Accuracy@0.5", COL_TIP.Accuracy, nFmt(4)],
+      ["test rows", "Test-Samples", "Rows in the test split.", intFmt]],
+    key: EX.ece.length ? `<span>10 equal-width bins · confidence = max(p, 1 − p) at the 0.5 cutoff · lower is better</span>`
+      : `<span>No runs/analysis/ece.csv yet: run <code>src/post_run_analysis.py</code>.</span>`,
+  }),
+
+  "disk-card": (s) => {
+    const rows = EX.disk.filter((r) => r.Mode === s.mode && PIPE_FOCUS.has(r.Pipeline) && (s.kind === "all" || r.Kind === s.kind));
+    const total = rows.reduce((t, r) => t + (r.MB || 0), 0);
+    return {
+      picks: [["mode", "Mode", EX_MODE_CHIPS],
+              ["kind", "Kind", [["all", "all", ""], ["model", "classifiers", "Saved .joblib classifier files."],
+                                ["embeddings", "embeddings", "Stored embedding matrices (.npy) for the whole dataset."]]]],
+      rows,
+      cols: [["Pipeline", "Pipeline", COL_TIP.Pipeline], ["kind", "Kind", ""], ["Emb", "Embeddings", COL_TIP.Emb],
+        ["Classifier", "Classifier", CLF_ABBR, (c) => (c ? clfFmt(c) : "—")], ["file", "File", ""],
+        ["MB", "MB", "File size in MB (10⁶ bytes).", nFmt(2)]],
+      key: EX.disk.length ? `<span>${rows.length} files shown · ${total.toFixed(1)} MB in total</span>`
+        : `<span>No runs/analysis/disk_usage.csv yet: run <code>src/post_run_analysis.py</code>.</span>`,
+    };
+  },
+
+  "dup-card": () => ({
+    picks: [],
+    rows: EX.dup.filter((r) => PIPE_FOCUS.has(r.Pipeline)),
+    cols: [["Pipeline", "Pipeline", COL_TIP.Pipeline],
+      ["field", "Field", "Which text was compared: the full intent + context input, or one part of it.\n"
+        + "P3's \"original document\" is the context before the injection was added."],
+      ["test rows", "Test-Rows", "Rows in the test split.", intFmt],
+      ["shared", "Test-Rows-Shared-With-Train", "Test rows whose exact text also appears among the training rows (fit + calibration).", intFmt],
+      ["share", "Share", "Shared test rows ÷ test rows.", pctFmt],
+      ["distinct", "Distinct-Test-Texts", "Different texts among the test rows.", intFmt],
+      ["same split", "Same-Split-All-Modes", "Whether every mode of this pipeline used the same test rows (needed for the cross-mode McNemar).",
+        (x) => (x === true ? "yes" : x === false ? "no" : "—")]],
+    key: EX.dup.length ? `<span>Exact text matches only · a shared intent is expected where the intent set is small (P1 reuses ${
+        intFmt(EX.dup.find((r) => r.Pipeline === "pipeline1_alamsabi" && r.Field === "user intent")?.["Distinct-Test-Texts"])} intents)</span>`
+      : `<span>No runs/analysis/duplicate_scan.csv yet: run <code>src/post_run_analysis.py</code>.</span>`,
+  }),
+};
+
+async function loadExtras() {
+  try { EX = await fetchJSON("/api/extras"); } catch { EX = null; }
+  renderExtras();
+}
+
+function renderExtras() {
+  if (!EX) return;
+  for (const [id, build] of Object.entries(EX_CARDS)) {
+    const card = document.getElementById(id), s = EX_STATE[id];
+    const v = build(s);
+    card.querySelector(".ex-pick").innerHTML = v.picks.map(([k, label, opts]) =>
+      `<div class="grp"><span class="lbl">${label}</span><div class="grp">${opts.map(([val, text, tip]) =>
+        `<button class="pipe-chip ${s[k] === val ? "sel" : ""}" data-k="${k}" data-v="${val}" aria-pressed="${s[k] === val}"${
+          tip ? ` data-tip="${esc(tip)}"` : ""}>${esc(text)}</button>`).join("")}</div></div>`).join("")
+      + (id === "e2e-card" ? "" : `<span class="pick-hint">pipelines follow the P1 / P2 / P3 filter above</span>`);
+
+    const rows = sortByPipeline(v.rows, s.sort);
+    // right-align a column when its values are numbers or yes/no flags
+    const isNum = (f) => rows.some((r) => typeof r[f] === "number" || typeof r[f] === "boolean");
+    const head = v.cols.map(([label, f, tip]) =>
+      `<th class="${isNum(f) ? "num" : ""}" data-sort="${esc(f)}"${tip ? ` data-tip="${esc(tip)}"` : ""}>${label}${sortArrow(s.sort, f)}</th>`).join("");
+    let prev = null;
+    const body = rows.map((r) => {
+      const sep = prev !== null && r.Pipeline !== prev ? ` class="pipe-sep"` : "";
+      prev = r.Pipeline;
+      return `<tr${sep}>${v.cols.map(([, f, , fmtFn]) => {
+        const x = r[f];
+        if (f === "Pipeline") return `<td data-tip="${esc(pLabel(x))}">${esc(pShort(x))}</td>`;
+        return `<td class="${isNum(f) ? "num" : ""}">${fmtFn ? fmtFn(x) : esc(x ?? "—")}</td>`;
+      }).join("")}</tr>`;
+    }).join("");
+    card.querySelector(".ex-table").innerHTML = rows.length ? `<tr>${head}</tr>${body}`
+      : `<tr><td class="muted">Nothing to show for this selection.</td></tr>`;
+    card.querySelector(".ex-key").innerHTML = v.key;
+  }
+}
+
+for (const id of Object.keys(EX_CARDS)) {
+  const card = document.getElementById(id);
+  onSortClick(`#${id} .ex-table`, EX_STATE[id].sort, renderExtras);
+  card.querySelector(".ex-pick").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-k]");
+    if (!b) return;
+    EX_STATE[id][b.dataset.k] = b.dataset.v;
+    renderExtras();
+  });
+}
+
 /* ---------- collapsible cards ----------
    Every Analysis card except Master results folds from its title bar. All runs starts
    folded; whatever the viewer chooses is remembered in this browser. */
-const FOLD_DEFAULT = { "ablation-card": false, "allrows-card": true, "resources-card": false, "figures-card": false };
+const FOLD_DEFAULT = { "ablation-card": false, "allrows-card": true, "resources-card": false, "figures-card": false,
+  "mcnemar-card": false, "e2e-card": false, "ece-card": false, "disk-card": true, "dup-card": false };
 let FOLD = {};
 try { FOLD = JSON.parse(localStorage.getItem("cardFold")) || {}; } catch { FOLD = {}; }
 

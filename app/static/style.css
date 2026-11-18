@@ -856,3 +856,6 @@ h2.fold-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: -2
 #rs-table tr.grp-top td { border-top: 1px solid var(--border-strong); }
 #rs-table tr.grp th:empty { background: var(--card2); border-bottom: 1px solid var(--border); }
 #rs-table td.sep { border-left: 1px solid var(--border); }
+
+/* extra analysis cards: no picker row when a card has no chips */
+.ex-pick:empty { display: none; }

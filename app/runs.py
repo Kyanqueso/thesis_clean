@@ -305,6 +305,33 @@ def resources() -> dict:
             "n_benchmark": sum(r["clf_src"] == "benchmark" for r in rows), "bench_file": BENCH_FILE}
 
 
+# ---------------- extra analysis: within-run McNemar and src/post_run_analysis.py / end_to_end_latency.py ----------------
+
+def _csv_rows(p: Path) -> list[dict]:
+    try:
+        return _json_rows(pd.read_csv(p))
+    except (OSError, pd.errors.ParserError, pd.errors.EmptyDataError):
+        return []
+
+
+def extras() -> dict:
+    """Within-run and cross-mode McNemar (with Holm), plus the tables under <runs>/analysis/."""
+    within, ablation = [], []
+    for pipeline in PIPELINES:
+        for mode in MODES:
+            within += [{"Pipeline": pipeline, "Mode": mode, **r}
+                       for r in _csv_rows(run_dir(pipeline, mode) / "results" / "mcnemar_within_run.csv")]
+        ablation += [{"Pipeline": pipeline, **r}
+                     for r in _csv_rows(paths.RUNS_DIR / pipeline / "ablation_mcnemar.csv")]
+    a = paths.RUNS_DIR / "analysis"
+    return {"within": within, "ablation": ablation,
+            "e2e": _csv_rows(a / "end_to_end_latency.csv"),
+            "e2e_meta": _read_json(a / "end_to_end_latency_meta.json"),
+            "ece": _csv_rows(a / "ece.csv"),
+            "disk": _csv_rows(a / "disk_usage.csv"),
+            "dup": _csv_rows(a / "duplicate_scan.csv")}
+
+
 def sample_rows(pipeline: str, n: int = 1) -> list[dict]:
     """Reservoir-sample n rows from a pipeline's jsonl dataset."""
     path = data_path(pipeline)

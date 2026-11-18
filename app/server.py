@@ -44,6 +44,12 @@ def get_resources():
     return runs.resources()
 
 
+@app.get("/api/extras")
+def get_extras():
+    """McNemar tables and the post-run analysis CSVs (ECE, disk, train/test overlap, end-to-end latency)."""
+    return runs.extras()
+
+
 @app.get("/api/figure")
 def get_figure(pipeline: str, mode: str, name: str):
     if pipeline not in runs.PIPELINES or mode not in runs.MODES:
