@@ -25,10 +25,7 @@
     <button data-go="resources-card">Resources</button>
     <button data-go="figures-card">Figures</button>
     <button data-go="mcnemar-card">McNemar</button>
-    <button data-go="e2e-card">E2E time</button>
-    <button data-go="ece-card">ECE</button>
-    <button data-go="disk-card">Disk</button>
-    <button data-go="dup-card">Overlap</button>
+    <button data-go="ztest-card">Datasets</button>
   </nav>
   <div id="queue-pill" class="pill">idle</div>
   <button class="gear" id="b-theme" aria-label="Switch to light theme" title="Switch to light theme">
@@ -270,7 +267,7 @@
     <div id="figures-list" class="figures"></div>
   </div>
 
-  <!-- extra analysis cards, filled by renderExtras() in app.js; to be regrouped per SOP later -->
+  <!-- extra analysis cards, filled by renderExtras() in app.js -->
   <div class="card ex-card" id="mcnemar-card">
     <h2>McNemar significance <span class="muted">— paired tests, Holm-corrected</span></h2>
     <div class="ab-pick ex-pick"></div>
@@ -278,32 +275,19 @@
     <div class="key ex-key"></div>
   </div>
 
-  <div class="card ex-card" id="e2e-card">
-    <h2>End-to-end inference time <span class="muted">— embed + classify, one request</span></h2>
-    <div class="ab-pick ex-pick"></div>
-    <div class="scroll"><table class="master ex-table"></table></div>
-    <div class="key ex-key"></div>
-  </div>
-
-  <div class="card ex-card" id="ece-card">
-    <h2>Calibration error (ECE) <span class="muted">— how far confidence is from accuracy</span></h2>
-    <div class="ab-pick ex-pick"></div>
-    <div class="scroll"><table class="master ex-table"></table></div>
-    <div class="key ex-key"></div>
-  </div>
-
-  <div class="card ex-card" id="disk-card">
-    <h2>Disk usage <span class="muted">— saved classifiers and embeddings</span></h2>
-    <div class="ab-pick ex-pick"></div>
-    <div class="scroll"><table class="master ex-table"></table></div>
-    <div class="key ex-key"></div>
-  </div>
-
-  <div class="card ex-card" id="dup-card">
-    <h2>Train / test overlap <span class="muted">— test text that also appears in training</span></h2>
-    <div class="ab-pick ex-pick"></div>
-    <div class="scroll"><table class="master ex-table"></table></div>
-    <div class="key ex-key"></div>
+  <div class="card" id="ztest-card">
+    <h2>Dataset comparison <span class="muted">— does swapping the dataset change accuracy? Two-proportion z-test, Holm-corrected</span></h2>
+    <div class="ex-block" id="ztest-block">
+      <div class="ab-pick ex-pick"></div>
+      <div class="scroll"><table class="master ex-table"></table></div>
+      <div class="key ex-key"></div>
+    </div>
+    <div class="ex-block" id="dup-block">
+      <h3 class="ex-sub">Train / test overlap <span class="muted">— test text that also appears in training (the no-overlap condition of SOP 3.2)</span></h3>
+      <div class="ab-pick ex-pick"></div>
+      <div class="scroll"><table class="master ex-table"></table></div>
+      <div class="key ex-key"></div>
+    </div>
   </div>
 </section>
 

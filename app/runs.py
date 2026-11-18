@@ -95,7 +95,12 @@ def _json_rows(df: pd.DataFrame) -> list[dict]:
 
 
 def all_results() -> list[dict]:
-    """Every run's full_evaluation_results.csv, with its operating_points.csv columns, tagged with Pipeline/Mode."""
+    """Every run's full_evaluation_results.csv, with its operating_points.csv columns and its ECE
+    (<runs>/analysis/ece.csv, from src/post_run_analysis.py), tagged with Pipeline/Mode."""
+    try:
+        ece = pd.read_csv(paths.RUNS_DIR / "analysis" / "ece.csv")[["Pipeline", "Mode", "Embeddings", "Classifier", "ECE"]]
+    except (OSError, pd.errors.ParserError, pd.errors.EmptyDataError, KeyError):
+        ece = None
     frames = []
     for pipeline in PIPELINES:
         for mode in MODES:
@@ -110,7 +115,12 @@ def all_results() -> list[dict]:
             df.insert(0, "Pipeline", pipeline)
             df.insert(1, "Mode", mode)
             frames.append(df)
-    return _json_rows(pd.concat(frames, ignore_index=True)) if frames else []
+    if not frames:
+        return []
+    out = pd.concat(frames, ignore_index=True)
+    if ece is not None:
+        out = out.merge(ece, on=["Pipeline", "Mode", "Embeddings", "Classifier"], how="left")
+    return _json_rows(out)
 
 
 # ---------------- master table: one row per (pipeline, embedding, classifier) ----------------
@@ -244,6 +254,11 @@ def resources() -> dict:
     """One row per pipeline x embedding x classifier (normal mode), embedding columns repeated per row."""
     bench = _read_json(paths.RUNS_DIR / BENCH_FILE)
     emb_b, clf_b = bench.get("embedding", {}), bench.get("classifier", {})
+    # end-to-end latency (src/end_to_end_latency.py) covers one pipeline x mode, named in its meta file
+    analysis = paths.RUNS_DIR / "analysis"
+    e2e_meta = _read_json(analysis / "end_to_end_latency_meta.json")
+    e2e = {(r["Embedding"], r["Classifier"]): r for r in _csv_rows(analysis / "end_to_end_latency.csv")}
+    emb_files = list(paths.RUNS_DIR.glob("pipeline*/*/embeddings/*_prompt.npy"))
     rows, emb_info, metas, stamps = [], {}, {}, []
     for r in all_results():
         pipeline, emb, clf = r["Pipeline"], str(r["Embeddings"]).lower(), r["Classifier"]
@@ -283,7 +298,10 @@ def resources() -> dict:
         bench_threads = (bench.get("machine") or {}).get("cpu_threads")
         threads = (bench_threads or run_threads) if clf_src == "benchmark" else (run_threads or bench_threads)
         cost["cpu_pct"] = _cpu_pct(cost["cpu_s"], cost["fit_s"], threads)
+        t = e2e.get((emb.upper(), clf), {}) if pipeline == e2e_meta.get("pipeline") else {}
         rows.append({
+            "e2e_embed_p50": t.get("Embed-P50(ms)"), "e2e_p50": t.get("E2E-P50(ms)"),
+            "e2e_p95": t.get("E2E-P95(ms)"), "e2e_p99": t.get("E2E-P99(ms)"), "e2e_prob_diff": t.get("Max-Prob-Diff"),
             "Pipeline": pipeline, "Embeddings": emb.upper(), "Classifier": clf,
             "emb_local": emb in EMB_LOCAL,
             "vram_mb": gpu["vram_peak_mb"], "gpu_mean": gpu["gpu_util_mean"], "gpu_max": gpu["gpu_util_max"],
@@ -302,7 +320,10 @@ def resources() -> dict:
     return {"rows": rows, "machine": machine, "measured_at": max(stamps) if stamps else None,
             "n_embedding": sum(v[3] is not None for v in emb_info.values()),
             "n_classifier": sum(r["clf_src"] is not None for r in rows),
-            "n_benchmark": sum(r["clf_src"] == "benchmark" for r in rows), "bench_file": BENCH_FILE}
+            "n_benchmark": sum(r["clf_src"] == "benchmark" for r in rows), "bench_file": BENCH_FILE,
+            "e2e_meta": e2e_meta,
+            # every stored embedding matrix: all pipelines x all input conditions (Chapter 4 cites this total)
+            "emb_total_mb": round(sum(f.stat().st_size for f in emb_files) / 1e6, 1), "emb_total_files": len(emb_files)}
 
 
 # ---------------- extra analysis: within-run McNemar and src/post_run_analysis.py / end_to_end_latency.py ----------------
@@ -325,10 +346,7 @@ def extras() -> dict:
                      for r in _csv_rows(paths.RUNS_DIR / pipeline / "ablation_mcnemar.csv")]
     a = paths.RUNS_DIR / "analysis"
     return {"within": within, "ablation": ablation,
-            "e2e": _csv_rows(a / "end_to_end_latency.csv"),
-            "e2e_meta": _read_json(a / "end_to_end_latency_meta.json"),
-            "ece": _csv_rows(a / "ece.csv"),
-            "disk": _csv_rows(a / "disk_usage.csv"),
+            "ztest": _csv_rows(a / "z_test_pipelines.csv"),
             "dup": _csv_rows(a / "duplicate_scan.csv")}
 
 

@@ -181,7 +181,7 @@ $$(".tab-btn").forEach((b) => b.addEventListener("click", () => {
    currently under the header is highlighted as the page scrolls, and links to
    cards that are hidden (no results yet) are hidden with them. */
 const SEC_IDS = ["master-card", "ablation-card", "allrows-card", "resources-card", "figures-card",
-  "mcnemar-card", "e2e-card", "ece-card", "disk-card", "dup-card"];
+  "mcnemar-card", "ztest-card"];
 const PAGE_HEADER = $("body > header");
 
 // the header's real height, so a jump lands just below it instead of under it
@@ -1180,7 +1180,7 @@ const RF = { view: "table", mode: "normal", metric: "ROC-AUC", embOff: new Set()
 // [result key, header, decimals, scale] — headers match Master results
 const RF_COLS = [
   ["Pipeline", "Pipeline"], ["Mode", "Mode"], ["Embeddings", "Emb"], ["Classifier", "Classifier"],
-  ["Accuracy", "Acc", 4], ["F1-Score", "F1", 4], ["ROC-AUC", "ROC-AUC", 4], ["PR-AUC", "PR-AUC", 4],
+  ["Accuracy", "Acc", 4], ["F1-Score", "F1", 4], ["ROC-AUC", "ROC-AUC", 4], ["PR-AUC", "PR-AUC", 4], ["ECE", "ECE", 4],
   ["Train-Time(s)", "fit s", 1], ["Inference-Time-per-Sample(ms)", "µs/row", 1, 1000],
 ];
 const RF_TIP = {
@@ -1188,6 +1188,9 @@ const RF_TIP = {
   "Classifier": "The classifier trained on the embeddings.\nA blue left edge marks the one Master results shows (best normal ROC-AUC).\n"
     + `${CLF_ABBR}.`,
   "Inference-Time-per-Sample(ms)": "Total inference time on the test set ÷ number of rows, in microseconds.",
+  "ECE": "Expected calibration error: how far the model's confidence is from its accuracy.\n"
+    + "Size-weighted average gap over 10 equal-width confidence bins; confidence = max(p, 1 − p).\n"
+    + "0 = perfectly calibrated; lower is better. From src/post_run_analysis.py (runs/analysis/ece.csv).",
   "Train-Time(s)": "Time to train the classifier, in seconds, timed in the run that produced these scores.\n"
     + "Resources used shows a separate re-measurement, so the two can differ by a few percent.",
 };
@@ -1394,7 +1397,22 @@ const RS_TIP = {
   p50: "Median time for the classifier to score one prompt, in milliseconds.",
   p99: "99th-percentile time to score one prompt: the slow tail, in milliseconds.",
   model: "Disk space of the saved classifier, in MB.",
+  e2e: "One live request, as deployed: embed the prompt, then score it (src/end_to_end_latency.py).\n"
+    + "Batch size 1, after warm-up requests. Measured on one pipeline × mode only; the footer says which.",
+  e2eEmbed: "Median time to embed one prompt, in ms. OpenAI's would include the network round trip.",
+  e2eP50: "Median end-to-end time for one request (embed + classify), in ms.",
+  e2eP95: "95th-percentile end-to-end time, in ms.",
+  e2eP99: "99th-percentile end-to-end time: the slow tail, in ms.",
 };
+
+// why a Resources row has no end-to-end numbers: another pipeline, or this embedding failed to time
+function e2eGap(r) {
+  const m = RES.e2e_meta || {};
+  if (!m.pipeline) return "No runs/analysis/end_to_end_latency.csv yet: run src/end_to_end_latency.py.";
+  if (r.Pipeline !== m.pipeline) return `End-to-end time was measured on ${pShort(m.pipeline)} only.`;
+  const err = (m.embeddings || {})[String(r.Embeddings).toLowerCase()]?.error;
+  return err ? `Not timed: ${err.split(" - ")[0]}` : "Not timed for this configuration.";
+}
 
 async function loadResources() {
   try { RES = await fetchJSON("/api/resources"); } catch { RES = null; }
@@ -1452,6 +1470,10 @@ function renderResources() {
           typeof r.cpu_pct === "number" ? `${r.cpu_pct.toFixed(0)} / ${n(r.cpu_peak_pct, 0)}` : "—"}</td>
         <td class="num">${n(r.ram_mb, 0)}</td>
         <td class="num sep">${n(r.p50_ms, 2)}</td><td class="num">${n(r.p99_ms, 2)}</td>
+        ${typeof r.e2e_p50 === "number"
+          ? `<td class="num sep">${n(r.e2e_embed_p50, 2)}</td><td class="num">${n(r.e2e_p50, 2)}</td><td class="num">${
+              n(r.e2e_p95, 2)}</td><td class="num">${n(r.e2e_p99, 2)}</td>`
+          : `<td class="num muted sep" colspan="4" data-tip="${esc(e2eGap(r))}">not measured</td>`}
         <td class="num sep">${n(r.model_mb, 2)}</td></tr>`;
     });
     lastPipe = g.rows[0].Pipeline;
@@ -1462,6 +1484,7 @@ function renderResources() {
       <th></th>
       <th colspan="4" data-tip="Training the classifier once, on the training rows.">Classifier training</th>
       <th colspan="2" data-tip="Scoring one prompt with the trained classifier.">Classifier inference</th>
+      <th colspan="4" data-tip="${esc(RS_TIP.e2e)}">End-to-end, one request</th>
       <th data-tip="Saved classifier file.">Disk</th></tr>
     <tr>${th("Pipeline", COL_TIP.Pipeline, "Pipeline", "")}${th("Emb", COL_TIP.Emb, "Embeddings", "")}
       ${th("VRAM MB", RS_TIP.vram, "vram_mb")}${th("GPU %", RS_TIP.gpu, "gpu_mean")}${th("disk MB", RS_TIP.embdisk, "emb_disk_mb")}
@@ -1469,7 +1492,10 @@ function renderResources() {
         ? "The classifier Master results shows for this pipeline × embedding (best normal ROC-AUC)."
         : "Each classifier trained on these embeddings, one row each.") + `\n${CLF_ABBR}.`, "Classifier", "")}
       ${th("fit s", RS_TIP.fit, "fit_s")}${th("CPU s", RS_TIP.cpu, "cpu_s")}${th("CPU %", RS_TIP.cpupct, "cpu_pct")}${th("fit RAM MB", RS_TIP.ram, "ram_mb")}
-      ${th("p50 ms", RS_TIP.p50, "p50_ms")}${th("p99 ms", RS_TIP.p99, "p99_ms")}${th("model MB", RS_TIP.model, "model_mb")}</tr>${body}`
+      ${th("p50 ms", RS_TIP.p50, "p50_ms")}${th("p99 ms", RS_TIP.p99, "p99_ms")}
+      ${th("embed p50", RS_TIP.e2eEmbed, "e2e_embed_p50")}${th("E2E p50", RS_TIP.e2eP50, "e2e_p50")}${
+        th("E2E p95", RS_TIP.e2eP95, "e2e_p95")}${th("E2E p99", RS_TIP.e2eP99, "e2e_p99")}
+      ${th("model MB", RS_TIP.model, "model_mb")}</tr>${body}`
     : `<tr><td class="muted">Nothing to show for this selection.</td></tr>`;
 
   const m = RES.machine;
@@ -1486,21 +1512,35 @@ function renderResources() {
        ${RS.rows === "all" ? `<span><i class="key-edge"></i>blue edge = the classifier Master results shows</span>` : ""}`
     : `<span>Not measured yet: only the disk sizes are filled in. Re-run from the Run tab, or use
        Run → Measure resources.</span>`;
+
+  // disk total across every pipeline and input condition, and what the end-to-end columns cover
+  const e = RES.e2e_meta || {};
+  const timed = RES.rows.filter((r) => typeof r.e2e_prob_diff === "number");
+  const maxDiff = (emb) => Math.max(...timed.filter((r) => r.Embeddings === emb).map((r) => r.e2e_prob_diff));
+  const embs = [...new Set(timed.map((r) => r.Embeddings))];
+  $("#rs-key").innerHTML += `
+    ${RES.emb_total_files ? `<span>stored embeddings, all pipelines × all input conditions: ${
+      (RES.emb_total_mb / 1000).toFixed(2)} GB in ${RES.emb_total_files} files</span>` : ""}
+    ${e.pipeline ? `<span>end-to-end: ${esc(pShort(e.pipeline))} · ${esc(MODE_SHORT[e.mode] || e.mode)}, ${intFmt(e.n_timed)} requests
+      (+${intFmt(e.n_warmup)} warm-up), ${esc(e.machine?.gpu || "")}${e.measured_at ? `, ${esc(e.measured_at.slice(0, 10))}` : ""}</span>
+      ${Object.entries(e.embeddings || {}).filter(([, v]) => v.error).map(([k, v]) =>
+        `<span>${esc(k.toUpperCase())} not timed: ${esc(v.error.split(" - ")[0])}</span>`).join("")}
+      ${embs.length ? `<span data-tip="${esc("Largest gap between a live probability and the one the training run stored for the same test row.\n"
+        + "Near 0 = the live path reproduces training exactly.")}">live vs stored probability, max gap: ${
+        esc(embs.map((emb) => `${emb} ${maxDiff(emb).toExponential(1)}`).join(" · "))}</span>` : ""}` : ""}`;
 }
 
 /* ---------- extra analysis cards ----------
-   McNemar (within run and across modes), end-to-end latency, ECE, disk usage and
-   train/test overlap, from /api/extras. One renderer drives all five: each card
-   has pick chips, a sortable table and a key line. Parked at the end of the tab
-   for now; they get regrouped per SOP later. */
+   McNemar (within run and across modes), the between-pipeline z-test and the
+   train/test overlap check, from /api/extras. One renderer drives every block:
+   each has pick chips, a sortable table and a key line. ECE lives in All runs,
+   disk and end-to-end time in Resources used. */
 let EX = null;
 const EX_ALPHA = 0.05;
 const EX_STATE = {
   "mcnemar-card": { view: "within", mode: "normal", show: "all", sort: { col: null, dir: 0 } },
-  "e2e-card": { sort: { col: null, dir: 0 } },
-  "ece-card": { mode: "normal", sort: { col: null, dir: 0 } },
-  "disk-card": { mode: "normal", kind: "all", sort: { col: null, dir: 0 } },
-  "dup-card": { sort: { col: null, dir: 0 } },
+  "ztest-block": { sop: "all", show: "all", sort: { col: null, dir: 0 } },
+  "dup-block": { sort: { col: null, dir: 0 } },
 };
 
 // p underflows to exactly 0 at n≈14k; say so instead of printing "0"
@@ -1515,111 +1555,85 @@ const clfFmt = (c) => esc(CLF_SHORT[c] || c);
 const modeFmt = (m) => esc(MODE_SHORT[m] || m);
 
 const EX_MODE_CHIPS = ["normal", "user_intent_only", "context_only"].map((m) => [m, MODE_SHORT[m], MODE_DESC[m]]);
-const EX_SIG_TIP = `Holm-corrected p below ${EX_ALPHA}: the two models (or modes) get different rows right more often than chance allows.`;
-const EX_P = [
-  ["p", "p_value", "Raw McNemar p, before correcting for the number of tests in this family.", pFmt],
+const EX_SHOW = (sigTip) => ["show", "Show", [["all", "all", ""], ["sig", "significant", sigTip], ["ns", "not significant", ""]]];
+const exP = (test, sigTip) => [
+  ["p", "p_value", `Raw ${test} p, before correcting for the number of tests in this family.`, pFmt],
   ["p (Holm)", "p_holm", "p after the Holm–Bonferroni step-down correction across every test in this family.\n"
-    + "This is the one to compare against α = 0.05.", pFmt],
-  ["sig.", "significant", EX_SIG_TIP, sigFmt],
+    + `This is the one to compare against α = ${EX_ALPHA}.`, pFmt],
+  ["sig.", "significant", sigTip, sigFmt],
 ];
-const EX_BC = [
-  ["b", "b", "Test rows model A got right and model B got wrong.", intFmt],
-  ["c", "c", "Test rows model B got right and model A got wrong.", intFmt],
-  ["test", "method", "chi2_continuity = chi-square with Yates' correction; exact = binomial test, used when b + c ≤ 25.", (x) => esc(x ?? "—")],
+const exAcc = (a, b) => [
+  ["acc A", "Acc-A", `Accuracy of ${a} at the 0.5 threshold.`, nFmt(4)],
+  ["acc B", "Acc-B", `Accuracy of ${b} at the 0.5 threshold.`, nFmt(4)],
+  ["Δ pp", "Acc-Diff(A-B)", "Accuracy of A − accuracy of B, in percentage points.", ppFmt],
 ];
+const exSig = (rows, s) => (s.show === "all" ? rows : rows.filter((r) => !!r.significant === (s.show === "sig")));
 
-// card id -> { picks: [[state key, label, [[value, text, tip]]]], rows, cols: [[header, field, tip, fmt]], key }
+const MC_SIG = `Holm-corrected p below ${EX_ALPHA}: the two models (or modes) get different rows right more often than chance allows.`;
+const Z_SIG = `Holm-corrected p below ${EX_ALPHA}: the two pipelines' accuracies differ by more than chance allows.`;
+const FOCUS_HINT = "pipelines follow the P1 / P2 / P3 filter above";
+
+// block id -> { picks: [[state key, label, [[value, text, tip]]]], rows, cols: [[header, field, tip, fmt(value, row)]],
+//               key, hint?, group? (row -> key; a new key draws a separator line) }
 const EX_CARDS = {
   "mcnemar-card": (s) => {
     const within = s.view === "within";
-    let rows = (within ? EX.within.filter((r) => r.Mode === s.mode) : EX.ablation)
-      .filter((r) => PIPE_FOCUS.has(r.Pipeline));
-    const nAll = rows.length, nSig = rows.filter((r) => r.significant).length;
-    if (s.show !== "all") rows = rows.filter((r) => !!r.significant === (s.show === "sig"));
-    const acc = [
-      ["acc A", "Acc-A", "Accuracy of A at the 0.5 threshold.", nFmt(4)],
-      ["acc B", "Acc-B", "Accuracy of B at the 0.5 threshold.", nFmt(4)],
-      ["Δ pp", "Acc-Diff(A-B)", "Accuracy of A − accuracy of B, in percentage points.", ppFmt],
-    ];
+    const all = (within ? EX.within.filter((r) => r.Mode === s.mode) : EX.ablation).filter((r) => PIPE_FOCUS.has(r.Pipeline));
     return {
       picks: [
         ["view", "Compare", [["within", "model vs model", "Every pair of embedding × classifier, scored on the same test rows of one run (mcnemar_within_run.csv)."],
                              ["ablation", "mode vs mode", "The same embedding × classifier across the normal / intent-only / context-only runs (ablation_mcnemar.csv)."]]],
         ...(within ? [["mode", "Mode", EX_MODE_CHIPS]] : []),
-        ["show", "Show", [["all", "all", ""], ["sig", "significant", EX_SIG_TIP], ["ns", "not significant", ""]]],
+        EX_SHOW(MC_SIG),
       ],
-      rows,
+      rows: exSig(all, s),
       cols: [["Pipeline", "Pipeline", COL_TIP.Pipeline],
         ...(within
           ? [["model A", "Model-A", "Embedding · classifier.", modelFmt], ["model B", "Model-B", "Embedding · classifier.", modelFmt]]
           : [["Emb", "Embeddings", COL_TIP.Emb], ["Classifier", "Classifier", CLF_ABBR, clfFmt],
              ["mode A", "Mode-A", "", modeFmt], ["mode B", "Mode-B", "", modeFmt]]),
-        ...acc, ...EX_BC, ...EX_P],
-      key: `<span>${nAll.toLocaleString()} tests in view · ${nSig.toLocaleString()} significant at Holm α = ${EX_ALPHA}</span>
+        ...exAcc("A", "B"),
+        ["b", "b", "Test rows A got right and B got wrong.", intFmt],
+        ["c", "c", "Test rows B got right and A got wrong.", intFmt],
+        ["test", "method", "chi2_continuity = chi-square with Yates' correction; exact = binomial test, used when b + c ≤ 25.", (x) => esc(x ?? "—")],
+        ...exP("McNemar", MC_SIG)],
+      key: `<span>${all.length.toLocaleString()} tests in view · ${all.filter((r) => r.significant).length.toLocaleString()} significant at Holm α = ${EX_ALPHA}</span>
         <span>Holm family = ${within ? "all model pairs within one run" : "all mode pairs within one pipeline"}</span>
         <span>McNemar tests accuracy at the 0.5 threshold on paired test rows</span>`,
     };
   },
 
-  "e2e-card": () => {
-    const m = EX.e2e_meta || {};
-    const devs = Object.entries(m.embeddings || {}).map(([e, v]) =>
-      `${e.toUpperCase()}: ${v.error ? `not timed — ${v.error.split(" - ")[0]}` : `${v.device}, loaded in ${v.load_s} s`}`);
-    const mc = m.machine || {};
-    const ms = (label, field, tip) => [label, field, tip, nFmt(2)];
+  // Hypothesis 3: each pipeline has its own test set, so the paired McNemar does not apply
+  "ztest-block": (s) => {
+    const all = EX.ztest.filter((r) => (s.sop === "all" || r.SOP === s.sop)
+      && (PIPE_FOCUS.has(r["Pipeline-A"]) || PIPE_FOCUS.has(r["Pipeline-B"])));
+    const pair = (r) => `${pShort(r["Pipeline-A"])} vs ${pShort(r["Pipeline-B"])}`;
     return {
-      picks: [],
-      rows: EX.e2e,
-      cols: [["Emb", "Embedding", COL_TIP.Emb], ["Classifier", "Classifier", CLF_ABBR, clfFmt],
-        ["requests", "Requests", "Timed requests, after the warm-up ones.", intFmt],
-        ms("embed p50", "Embed-P50(ms)", "Median time to embed one prompt, in ms. OpenAI includes the network round trip."),
-        ms("classify p50", "Classify-P50(ms)", "Median time for the classifier to score one embedded prompt, in ms."),
-        ms("E2E p50", "E2E-P50(ms)", "Median end-to-end time for one request (embed + classify), in ms."),
-        ms("E2E p95", "E2E-P95(ms)", "95th-percentile end-to-end time, in ms."),
-        ms("E2E p99", "E2E-P99(ms)", "99th-percentile end-to-end time: the slow tail, in ms."),
-        ms("E2E mean", "E2E-Mean(ms)", "Mean end-to-end time, in ms."),
-        ms("E2E max", "E2E-Max(ms)", "Slowest single request, in ms."),
-        ["max |Δp|", "Max-Prob-Diff", "Largest gap between the live probability and the one stored by the training run for the same row.\n"
-          + "Near 0 = the live path reproduces training exactly.", (x) => (typeof x === "number" ? x.toExponential(1) : "—")]],
-      key: EX.e2e.length
-        ? `<span>${m.pipeline ? `${esc(pShort(m.pipeline))} · ${esc(MODE_SHORT[m.mode] || m.mode)} only` : ""} · ${intFmt(m.n_timed)} requests
-             (+${intFmt(m.n_warmup)} warm-up), batch size ${m.batch_size ?? 1}, half benign / half malicious test rows</span>
-           <span>${esc([mc.gpu, mc.processor].filter(Boolean).join(" · "))}${m.measured_at ? `, ${esc(m.measured_at.slice(0, 10))}` : ""}</span>
-           ${devs.map((d) => `<span>${esc(d)}</span>`).join("")}
-           <span>does not follow the P1 / P2 / P3 filter</span>`
-        : `<span>No runs/analysis/end_to_end_latency.csv yet: run <code>src/end_to_end_latency.py</code>.</span>`,
+      picks: [["sop", "SOP", [["all", "all", ""],
+                              ["SOP 3.1", "3.1", "Synthetic vs organic benign data: P2 vs P1."],
+                              ["SOP 3.2", "3.2", "Fully organic, self-injected, no train/test overlap: P3 vs P1 and P3 vs P2."]]],
+              EX_SHOW(Z_SIG)],
+      hint: "shows comparisons that involve a pipeline in the P1 / P2 / P3 filter",
+      rows: exSig(all, s),
+      group: (r) => `${r.SOP}|${r["Pipeline-B"]}`,
+      cols: [["SOP", "SOP", "Which research question the comparison answers."],
+        ["compared", "Pipeline-B", "Pipeline A vs pipeline B. Hover a cell for the full names.",
+          (_, r) => `<span data-tip="${esc(`A: ${pLabel(r["Pipeline-A"])}\nB: ${pLabel(r["Pipeline-B"])}`)}">${esc(pair(r))}</span>`],
+        ["Emb", "Embeddings", COL_TIP.Emb], ["Classifier", "Classifier", CLF_ABBR, clfFmt],
+        ...exAcc("pipeline A", "pipeline B"),
+        ["n A", "n-A", "Test rows in pipeline A.", intFmt], ["n B", "n-B", "Test rows in pipeline B.", intFmt],
+        ["z", "z", "Pooled two-proportion z statistic: (acc A − acc B) ÷ √(p̂(1 − p̂)(1/nA + 1/nB)).", nFmt(2)],
+        ...exP("z-test", Z_SIG)],
+      key: EX.ztest.length
+        ? `<span>${all.length} tests in view · ${all.filter((r) => r.significant).length} significant at Holm α = ${EX_ALPHA}</span>
+           <span>same embedding × classifier, normal mode, accuracy at the 0.5 threshold</span>
+           <span>Holm family = one SOP (15 tests for 3.1, 30 for 3.2)</span>
+           <span>test sets treated as independent; P3 reuses P2's organic documents, so P3 vs P2 is only approximately so</span>`
+        : `<span>No runs/analysis/z_test_pipelines.csv yet: run <code>src/post_run_analysis.py</code>.</span>`,
     };
   },
 
-  "ece-card": (s) => ({
-    picks: [["mode", "Mode", EX_MODE_CHIPS]],
-    rows: EX.ece.filter((r) => r.Mode === s.mode && PIPE_FOCUS.has(r.Pipeline)),
-    cols: [["Pipeline", "Pipeline", COL_TIP.Pipeline], ["Emb", "Embeddings", COL_TIP.Emb], ["Classifier", "Classifier", CLF_ABBR, clfFmt],
-      ["ECE", "ECE", "Expected calibration error: the size-weighted average gap between confidence and accuracy over "
-        + "10 equal-width confidence bins.\nConfidence = max(p, 1 − p). 0 = perfectly calibrated; lower is better.", nFmt(4)],
-      ["acc @0.5", "Accuracy@0.5", COL_TIP.Accuracy, nFmt(4)],
-      ["test rows", "Test-Samples", "Rows in the test split.", intFmt]],
-    key: EX.ece.length ? `<span>10 equal-width bins · confidence = max(p, 1 − p) at the 0.5 cutoff · lower is better</span>`
-      : `<span>No runs/analysis/ece.csv yet: run <code>src/post_run_analysis.py</code>.</span>`,
-  }),
-
-  "disk-card": (s) => {
-    const rows = EX.disk.filter((r) => r.Mode === s.mode && PIPE_FOCUS.has(r.Pipeline) && (s.kind === "all" || r.Kind === s.kind));
-    const total = rows.reduce((t, r) => t + (r.MB || 0), 0);
-    return {
-      picks: [["mode", "Mode", EX_MODE_CHIPS],
-              ["kind", "Kind", [["all", "all", ""], ["model", "classifiers", "Saved .joblib classifier files."],
-                                ["embeddings", "embeddings", "Stored embedding matrices (.npy) for the whole dataset."]]]],
-      rows,
-      cols: [["Pipeline", "Pipeline", COL_TIP.Pipeline], ["kind", "Kind", ""], ["Emb", "Embeddings", COL_TIP.Emb],
-        ["Classifier", "Classifier", CLF_ABBR, (c) => (c ? clfFmt(c) : "—")], ["file", "File", ""],
-        ["MB", "MB", "File size in MB (10⁶ bytes).", nFmt(2)]],
-      key: EX.disk.length ? `<span>${rows.length} files shown · ${total.toFixed(1)} MB in total</span>`
-        : `<span>No runs/analysis/disk_usage.csv yet: run <code>src/post_run_analysis.py</code>.</span>`,
-    };
-  },
-
-  "dup-card": () => ({
+  "dup-block": () => ({
     picks: [],
     rows: EX.dup.filter((r) => PIPE_FOCUS.has(r.Pipeline)),
     cols: [["Pipeline", "Pipeline", COL_TIP.Pipeline],
@@ -1631,8 +1645,13 @@ const EX_CARDS = {
       ["distinct", "Distinct-Test-Texts", "Different texts among the test rows.", intFmt],
       ["same split", "Same-Split-All-Modes", "Whether every mode of this pipeline used the same test rows (needed for the cross-mode McNemar).",
         (x) => (x === true ? "yes" : x === false ? "no" : "—")]],
-    key: EX.dup.length ? `<span>Exact text matches only · a shared intent is expected where the intent set is small (P1 reuses ${
-        intFmt(EX.dup.find((r) => r.Pipeline === "pipeline1_alamsabi" && r.Field === "user intent")?.["Distinct-Test-Texts"])} intents)</span>`
+    // the intent counts follow the P1 / P2 / P3 filter like the table does
+    key: EX.dup.length ? `<span>Exact text matches only · shared intents are expected where few distinct intents are reused${
+        (() => {
+          const used = EX.dup.filter((r) => PIPE_FOCUS.has(r.Pipeline) && r.Field === "user intent")
+            .map((r) => `${pShort(r.Pipeline)}: ${intFmt(r["Distinct-Test-Texts"])} distinct intents across ${intFmt(r["Test-Rows"])} test rows`);
+          return used.length ? ` (${esc(used.join("; "))})` : "";
+        })()}</span>`
       : `<span>No runs/analysis/duplicate_scan.csv yet: run <code>src/post_run_analysis.py</code>.</span>`,
   }),
 };
@@ -1645,39 +1664,40 @@ async function loadExtras() {
 function renderExtras() {
   if (!EX) return;
   for (const [id, build] of Object.entries(EX_CARDS)) {
-    const card = document.getElementById(id), s = EX_STATE[id];
+    const box = document.getElementById(id), s = EX_STATE[id];
     const v = build(s);
-    card.querySelector(".ex-pick").innerHTML = v.picks.map(([k, label, opts]) =>
+    box.querySelector(".ex-pick").innerHTML = v.picks.map(([k, label, opts]) =>
       `<div class="grp"><span class="lbl">${label}</span><div class="grp">${opts.map(([val, text, tip]) =>
         `<button class="pipe-chip ${s[k] === val ? "sel" : ""}" data-k="${k}" data-v="${val}" aria-pressed="${s[k] === val}"${
           tip ? ` data-tip="${esc(tip)}"` : ""}>${esc(text)}</button>`).join("")}</div></div>`).join("")
-      + (id === "e2e-card" ? "" : `<span class="pick-hint">pipelines follow the P1 / P2 / P3 filter above</span>`);
+      + `<span class="pick-hint">${esc(v.hint || FOCUS_HINT)}</span>`;
 
     const rows = sortByPipeline(v.rows, s.sort);
+    const group = v.group || ((r) => r.Pipeline);
     // right-align a column when its values are numbers or yes/no flags
     const isNum = (f) => rows.some((r) => typeof r[f] === "number" || typeof r[f] === "boolean");
     const head = v.cols.map(([label, f, tip]) =>
       `<th class="${isNum(f) ? "num" : ""}" data-sort="${esc(f)}"${tip ? ` data-tip="${esc(tip)}"` : ""}>${label}${sortArrow(s.sort, f)}</th>`).join("");
     let prev = null;
     const body = rows.map((r) => {
-      const sep = prev !== null && r.Pipeline !== prev ? ` class="pipe-sep"` : "";
-      prev = r.Pipeline;
+      const g = group(r);
+      const sep = prev !== null && g !== prev ? ` class="pipe-sep"` : "";
+      prev = g;
       return `<tr${sep}>${v.cols.map(([, f, , fmtFn]) => {
         const x = r[f];
         if (f === "Pipeline") return `<td data-tip="${esc(pLabel(x))}">${esc(pShort(x))}</td>`;
-        return `<td class="${isNum(f) ? "num" : ""}">${fmtFn ? fmtFn(x) : esc(x ?? "—")}</td>`;
+        return `<td class="${isNum(f) ? "num" : ""}">${fmtFn ? fmtFn(x, r) : esc(x ?? "—")}</td>`;
       }).join("")}</tr>`;
     }).join("");
-    card.querySelector(".ex-table").innerHTML = rows.length ? `<tr>${head}</tr>${body}`
+    box.querySelector(".ex-table").innerHTML = rows.length ? `<tr>${head}</tr>${body}`
       : `<tr><td class="muted">Nothing to show for this selection.</td></tr>`;
-    card.querySelector(".ex-key").innerHTML = v.key;
+    box.querySelector(".ex-key").innerHTML = v.key;
   }
 }
 
 for (const id of Object.keys(EX_CARDS)) {
-  const card = document.getElementById(id);
   onSortClick(`#${id} .ex-table`, EX_STATE[id].sort, renderExtras);
-  card.querySelector(".ex-pick").addEventListener("click", (e) => {
+  document.getElementById(id).querySelector(".ex-pick").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-k]");
     if (!b) return;
     EX_STATE[id][b.dataset.k] = b.dataset.v;
@@ -1689,7 +1709,7 @@ for (const id of Object.keys(EX_CARDS)) {
    Every Analysis card except Master results folds from its title bar. All runs starts
    folded; whatever the viewer chooses is remembered in this browser. */
 const FOLD_DEFAULT = { "ablation-card": false, "allrows-card": true, "resources-card": false, "figures-card": false,
-  "mcnemar-card": false, "e2e-card": false, "ece-card": false, "disk-card": true, "dup-card": false };
+  "mcnemar-card": false, "ztest-card": false };
 let FOLD = {};
 try { FOLD = JSON.parse(localStorage.getItem("cardFold")) || {}; } catch { FOLD = {}; }
 
