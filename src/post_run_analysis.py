@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT_DIR))
 from pipeline_paths import DATA_DIR, DATASETS, MODES, RUNS_DIR  # noqa: E402
 
 N_BINS = 10   # ECE: equal-width bins, confidence = max(p, 1 - p) at the 0.5 cutoff (Chapter 3)
-OUT_DIR = RUNS_DIR / "analysis"   # ece.csv, disk_usage.csv, duplicate_scan.csv, two_proportion_z.csv
+OUT_DIR = RUNS_DIR / "analysis"   # ece.csv, disk_usage.csv, duplicate_scan.csv, two_proportion_z.csv, z_test_pipelines.csv
 
 # two-proportion z-test: Pipelines 2 and 3 against Pipeline 1, normal mode, matched embedding x classifier
 Z_REFERENCE = "pipeline1_alamsabi"
@@ -180,10 +180,50 @@ def z_test_table() -> pd.DataFrame:
     return table.sort_values(["Comparison", "Embeddings", "Classifier"]).reset_index(drop=True)
 
 
+Z_SOPS = (("SOP 3.1", [("pipeline2_organic_bipia", "pipeline1_alamsabi")]),
+          ("SOP 3.2", [("pipeline3_organic_injected", "pipeline1_alamsabi"),
+                       ("pipeline3_organic_injected", "pipeline2_organic_bipia")]))
+
+
+def _z_counts(pipeline: str) -> pd.DataFrame | None:
+    path = RUNS_DIR / pipeline / Z_MODE / "results" / "full_evaluation_results.csv"
+    if not path.is_file():
+        return None
+    df = pd.read_csv(path)
+    df["x"] = df["TP"] + df["TN"]
+    df["n"] = df[["TN", "FP", "FN", "TP"]].sum(axis=1)
+    return df[["Embeddings", "Classifier", "x", "n"]]
+
+
+def z_test_pipelines_table() -> pd.DataFrame:
+    """The same z-test, laid out for the dashboard's Dataset comparison card: grouped by SOP, with P3 against
+    both P1 and P2 for SOP 3.2, and Holm applied within each SOP (15 tests for 3.1, 30 for 3.2)."""
+    tables = []
+    for sop, pairs in Z_SOPS:
+        rows = []
+        for a, b in pairs:
+            da, db = _z_counts(a), _z_counts(b)
+            if da is None or db is None:
+                continue
+            for r in da.merge(db, on=["Embeddings", "Classifier"], suffixes=("_a", "_b")).itertuples(index=False):
+                res = two_proportion_z(int(r.x_a), int(r.n_a), int(r.x_b), int(r.n_b))
+                rows.append({"SOP": sop, "Pipeline-A": a, "Pipeline-B": b,
+                             "Embeddings": r.Embeddings, "Classifier": r.Classifier,
+                             "Acc-A": r.x_a / r.n_a, "Acc-B": r.x_b / r.n_b, "Acc-Diff(A-B)": res["Diff"],
+                             "CI95-Low": res["CI95-Low"], "CI95-High": res["CI95-High"],
+                             "n-A": int(r.n_a), "n-B": int(r.n_b), "z": res["z"], "p_value": res["p_value"]})
+        if rows:
+            t = pd.DataFrame(rows)
+            t["p_holm"] = holm(t["p_value"].tolist())
+            t["significant"] = t["p_holm"] <= Z_ALPHA
+            tables.append(t)
+    return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
+
+
 def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for name, build in (("ece", ece_table), ("disk_usage", disk_table), ("duplicate_scan", duplicate_table),
-                        ("two_proportion_z", z_test_table)):
+                        ("two_proportion_z", z_test_table), ("z_test_pipelines", z_test_pipelines_table)):
         table = build()
         if table.empty:
             print(f"{name}: nothing to report (no finished runs under {RUNS_DIR})")
