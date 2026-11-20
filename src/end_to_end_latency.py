@@ -1,4 +1,4 @@
-"""Time one request end to end (embed, then classify) for every embedding and saved classifier."""
+"""Time one prompt end to end (embed, then classify) for every pipeline, embedding and saved classifier."""
 
 from __future__ import annotations
 
@@ -91,10 +91,10 @@ def pick_rows(run: Path, n: int, seed: int) -> tuple[np.ndarray, np.ndarray, dic
 
 def summarise(req: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for (emb, clf), g in req.groupby(["embedding", "classifier"], sort=False):
+    for (pipe, emb, clf), g in req.groupby(["pipeline", "embedding", "classifier"], sort=False):
         e2e, emb_ms, clf_ms = g.e2e_ms.to_numpy(), g.embed_ms.to_numpy(), g.classify_ms.to_numpy()
         rows.append({
-            "Embedding": emb.upper(), "Classifier": clf, "Requests": len(g),
+            "Pipeline": pipe, "Embedding": emb.upper(), "Classifier": clf, "Requests": len(g),
             "Embed-P50(ms)": np.percentile(emb_ms, 50), "Embed-Mean(ms)": emb_ms.mean(),
             "Classify-P50(ms)": np.percentile(clf_ms, 50), "Classify-Mean(ms)": clf_ms.mean(),
             "E2E-P50(ms)": np.percentile(e2e, 50), "E2E-P95(ms)": np.percentile(e2e, 95),
@@ -106,7 +106,8 @@ def summarise(req: pd.DataFrame) -> pd.DataFrame:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--pipeline", default="pipeline3_organic_injected", choices=list(DATASETS))
+    ap.add_argument("--pipelines", default="all",
+                    help=f"comma-separated subset of {', '.join(DATASETS)}, or all (default)")
     ap.add_argument("--mode", default="normal", choices=MODES)
     ap.add_argument("--embeddings", default="minilm,qwen3,openai",
                     help="comma-separated subset of minilm, qwen3, openai")
@@ -124,22 +125,26 @@ def main() -> int:
         ap.error(f"unknown embedding(s): {', '.join(unknown)}")
     if args.n < 2 or args.n % 2:
         ap.error("--n must be an even number of at least 2")
+    pipes = list(DATASETS) if args.pipelines == "all" else [p.strip() for p in args.pipelines.split(",") if p.strip()]
+    if unknown := [p for p in pipes if p not in DATASETS]:
+        ap.error(f"unknown pipeline(s): {', '.join(unknown)}")
 
-    run = RUNS_DIR / args.pipeline / args.mode
-    df = pd.read_json(DATA_DIR / DATASETS[args.pipeline], lines=True)
-    rows, labels, stored = pick_rows(run, args.n + args.warmup, args.seed)
-    texts = [build_text(str(df.user_intent.iat[i]), str(df.context.iat[i]), args.mode) for i in rows]
-    print(f"{args.pipeline}/{args.mode}: {args.warmup} warm-up + {args.n} timed requests per embedding, "
-          f"drawn from the {len(df):,}-row dataset's test split")
+    jobs = []
+    for pipe in pipes:
+        run = RUNS_DIR / pipe / args.mode
+        if not (run / "results" / "predictions.npz").is_file():
+            print(f"{pipe}/{args.mode}: no finished run; skipped")
+            continue
+        df = pd.read_json(DATA_DIR / DATASETS[pipe], lines=True)
+        rows, labels, stored = pick_rows(run, args.n + args.warmup, args.seed)
+        texts = [build_text(str(df.user_intent.iat[i]), str(df.context.iat[i]), args.mode) for i in rows]
+        jobs.append((pipe, run, texts, labels, stored))
+        print(f"{pipe}/{args.mode}: {args.warmup} warm-up + {args.n} timed requests per embedding, "
+              f"drawn from the {len(df):,}-row dataset's test split")
 
     import joblib
     records, meta_emb = [], {}
     for emb in embs:
-        models = {c: joblib.load(run / "models" / f"{emb}_{c}.joblib") for c in CLASSIFIERS
-                  if (run / "models" / f"{emb}_{c}.joblib").is_file()}
-        if not models:
-            print(f"\n[{emb}] no saved classifiers in {run / 'models'}; skipped")
-            continue
         print(f"\n[{emb}] loading {EMBEDDINGS[emb]} ...")
         try:
             embedder = Embedder(emb, args.device)
@@ -147,18 +152,20 @@ def main() -> int:
             print(f"[{emb}] could not load: {describe(exc)}")
             meta_emb[emb] = {"error": f"{describe(exc)}"}
             continue
-        print(f"[{emb}] loaded on {embedder.device} in {embedder.load_s:.1f} s; "
-              f"classifiers: {', '.join(models)}")
-
-        try:
-            emb_records = time_embedding(emb, embedder, models, texts, labels, stored, args)
-        except Exception as exc:   # e.g. a rejected API key or a network failure: keep the others
-            print(f"[{emb}] failed while timing, results discarded: {describe(exc)}")
-            meta_emb[emb] = {"error": f"{describe(exc)}"}
-            del embedder
-            continue
-        records += emb_records
+        print(f"[{emb}] loaded on {embedder.device} in {embedder.load_s:.1f} s")
         meta_emb[emb] = {"device": embedder.device, "load_s": round(embedder.load_s, 2)}
+
+        for pipe, run, texts, labels, stored in jobs:
+            models = {c: joblib.load(run / "models" / f"{emb}_{c}.joblib") for c in CLASSIFIERS
+                      if (run / "models" / f"{emb}_{c}.joblib").is_file()}
+            if not models:
+                print(f"[{pipe} · {emb}] no saved classifiers in {run / 'models'}; skipped")
+                continue
+            try:
+                records += time_embedding(pipe, emb, embedder, models, texts, labels, stored, args)
+            except Exception as exc:   # e.g. a rejected API key or a network failure: keep the others
+                print(f"[{pipe} · {emb}] failed while timing, results discarded: {describe(exc)}")
+                meta_emb[emb].setdefault("errors", {})[pipe] = describe(exc)
         del embedder
 
     if not records:
@@ -167,7 +174,7 @@ def main() -> int:
     return report(records, meta_emb, args)
 
 
-def time_embedding(emb, embedder, models, texts, labels, stored, args) -> list[dict]:
+def time_embedding(pipe, emb, embedder, models, texts, labels, stored, args) -> list[dict]:
     warm, timed = slice(0, args.warmup), slice(args.warmup, None)
     for text in texts[warm]:   # first calls allocate memory, compile kernels, open connections
         vec = embedder(text).reshape(1, -1)
@@ -185,13 +192,13 @@ def time_embedding(emb, embedder, models, texts, labels, stored, args) -> list[d
             clf_ms = (time.perf_counter() - t1) * 1000
             ref = stored.get(f"{emb}__{clf}")
             records.append({
-                "embedding": emb, "classifier": clf, "request": k, "label": int(y),
+                "pipeline": pipe, "embedding": emb, "classifier": clf, "request": k, "label": int(y),
                 "embed_ms": embed_ms, "classify_ms": clf_ms, "e2e_ms": embed_ms + clf_ms,
                 "probability": prob,
                 "stored_probability": float(ref[args.warmup + k]) if ref is not None else np.nan,
             })
         if (k + 1) % 50 == 0 or k + 1 == args.n:
-            print(f"[{emb}] {k + 1}/{args.n} requests")
+            print(f"[{pipe} · {emb}] {k + 1}/{args.n} requests")
     return records
 
 
@@ -211,7 +218,7 @@ def report(records: list[dict], meta_emb: dict, args) -> int:
         pass
     meta = {
         "measured_at": datetime.now().isoformat(timespec="seconds"),
-        "pipeline": args.pipeline, "mode": args.mode, "n_timed": args.n, "n_warmup": args.warmup,
+        "pipelines": list(dict.fromkeys(req.pipeline)), "mode": args.mode, "n_timed": args.n, "n_warmup": args.warmup,
         "seed": args.seed, "batch_size": 1, "timer": "time.perf_counter",
         "machine": {"platform": platform.platform(), "processor": platform.processor(),
                     "python": platform.python_version(), "gpu": gpu},
@@ -222,7 +229,7 @@ def report(records: list[dict], meta_emb: dict, args) -> int:
     }
     (args.out / "end_to_end_latency_meta.json").write_text(json.dumps(meta, indent=2))
 
-    show = summary[["Embedding", "Classifier", "Embed-P50(ms)", "Classify-P50(ms)", "E2E-P50(ms)",
+    show = summary[["Pipeline", "Embedding", "Classifier", "Embed-P50(ms)", "Classify-P50(ms)", "E2E-P50(ms)",
                     "E2E-P95(ms)", "E2E-P99(ms)", "Max-Prob-Diff"]]
     print("\n" + show.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
     print(f"\nSaved to {args.out / 'end_to_end_latency.csv'} (+ _requests.csv, _meta.json)")

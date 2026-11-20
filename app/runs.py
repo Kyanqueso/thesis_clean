@@ -254,10 +254,12 @@ def resources() -> dict:
     """One row per pipeline x embedding x classifier (normal mode), embedding columns repeated per row."""
     bench = _read_json(paths.RUNS_DIR / BENCH_FILE)
     emb_b, clf_b = bench.get("embedding", {}), bench.get("classifier", {})
-    # end-to-end latency (src/end_to_end_latency.py) covers one pipeline x mode, named in its meta file
+    # end-to-end latency (src/end_to_end_latency.py): one file, a Pipeline column per row; a file from before
+    # that column existed covers the single pipeline named in its meta file
     analysis = paths.RUNS_DIR / "analysis"
     e2e_meta = _read_json(analysis / "end_to_end_latency_meta.json")
-    e2e = {(r["Embedding"], r["Classifier"]): r for r in _csv_rows(analysis / "end_to_end_latency.csv")}
+    e2e = {(r.get("Pipeline") or e2e_meta.get("pipeline"), r["Embedding"], r["Classifier"]): r
+           for r in _csv_rows(analysis / "end_to_end_latency.csv")}
     emb_files = list(paths.RUNS_DIR.glob("pipeline*/*/embeddings/*_prompt.npy"))
     rows, emb_info, metas, stamps = [], {}, {}, []
     for r in all_results():
@@ -298,7 +300,7 @@ def resources() -> dict:
         bench_threads = (bench.get("machine") or {}).get("cpu_threads")
         threads = (bench_threads or run_threads) if clf_src == "benchmark" else (run_threads or bench_threads)
         cost["cpu_pct"] = _cpu_pct(cost["cpu_s"], cost["fit_s"], threads)
-        t = e2e.get((emb.upper(), clf), {}) if pipeline == e2e_meta.get("pipeline") else {}
+        t = e2e.get((pipeline, emb.upper(), clf), {})
         rows.append({
             "e2e_embed_p50": t.get("Embed-P50(ms)"), "e2e_p50": t.get("E2E-P50(ms)"),
             "e2e_p95": t.get("E2E-P95(ms)"), "e2e_p99": t.get("E2E-P99(ms)"), "e2e_prob_diff": t.get("Max-Prob-Diff"),

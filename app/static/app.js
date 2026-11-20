@@ -1397,20 +1397,24 @@ const RS_TIP = {
   p50: "Median time for the classifier to score one prompt, in milliseconds.",
   p99: "99th-percentile time to score one prompt: the slow tail, in milliseconds.",
   model: "Disk space of the saved classifier, in MB.",
-  e2e: "One live request, as deployed: embed the prompt, then score it (src/end_to_end_latency.py).\n"
-    + "Batch size 1, after warm-up requests. Measured on one pipeline × mode only; the footer says which.",
-  e2eEmbed: "Median time to embed one prompt, in ms. OpenAI's would include the network round trip.",
-  e2eP50: "Median end-to-end time for one request (embed + classify), in ms.",
+  e2e: "Response time for one prompt sent on its own, as a live system receives it: embed the prompt, then score it\n"
+    + "(src/end_to_end_latency.py). Batch size 1, after warm-up prompts, normal mode; the footer says which pipelines and when.",
+  e2eEmbed: "Median time to embed one prompt, in ms. OpenAI's includes the network round trip.",
+  e2eP50: "Median end-to-end time for one prompt (embed + classify), in ms.",
   e2eP95: "95th-percentile end-to-end time, in ms.",
   e2eP99: "99th-percentile end-to-end time: the slow tail, in ms.",
 };
 
 // why a Resources row has no end-to-end numbers: another pipeline, or this embedding failed to time
+const e2ePipes = (m) => m.pipelines || (m.pipeline ? [m.pipeline] : []);
+
 function e2eGap(r) {
   const m = RES.e2e_meta || {};
-  if (!m.pipeline) return "No runs/analysis/end_to_end_latency.csv yet: run src/end_to_end_latency.py.";
-  if (r.Pipeline !== m.pipeline) return `End-to-end time was measured on ${pShort(m.pipeline)} only.`;
-  const err = (m.embeddings || {})[String(r.Embeddings).toLowerCase()]?.error;
+  const pipes = e2ePipes(m);
+  if (!pipes.length) return "No runs/analysis/end_to_end_latency.csv yet: run src/end_to_end_latency.py.";
+  if (!pipes.includes(r.Pipeline)) return `End-to-end time was measured on ${pipes.map(pShort).join(", ")} only.`;
+  const e = (m.embeddings || {})[String(r.Embeddings).toLowerCase()] || {};
+  const err = e.error || (e.errors || {})[r.Pipeline];
   return err ? `Not timed: ${err.split(" - ")[0]}` : "Not timed for this configuration.";
 }
 
@@ -1484,7 +1488,7 @@ function renderResources() {
       <th></th>
       <th colspan="4" data-tip="Training the classifier once, on the training rows.">Classifier training</th>
       <th colspan="2" data-tip="Scoring one prompt with the trained classifier.">Classifier inference</th>
-      <th colspan="4" data-tip="${esc(RS_TIP.e2e)}">End-to-end, one request</th>
+      <th colspan="4" data-tip="${esc(RS_TIP.e2e)}">End-to-end, per prompt</th>
       <th data-tip="Saved classifier file.">Disk</th></tr>
     <tr>${th("Pipeline", COL_TIP.Pipeline, "Pipeline", "")}${th("Emb", COL_TIP.Emb, "Embeddings", "")}
       ${th("VRAM MB", RS_TIP.vram, "vram_mb")}${th("GPU %", RS_TIP.gpu, "gpu_mean")}${th("disk MB", RS_TIP.embdisk, "emb_disk_mb")}
@@ -1521,7 +1525,7 @@ function renderResources() {
   $("#rs-key").innerHTML += `
     ${RES.emb_total_files ? `<span>stored embeddings, all pipelines × all input conditions: ${
       (RES.emb_total_mb / 1000).toFixed(2)} GB in ${RES.emb_total_files} files</span>` : ""}
-    ${e.pipeline ? `<span>end-to-end: ${esc(pShort(e.pipeline))} · ${esc(MODE_SHORT[e.mode] || e.mode)}, ${intFmt(e.n_timed)} requests
+    ${e2ePipes(e).length ? `<span>end-to-end: ${esc(e2ePipes(e).map(pShort).join(", "))} · ${esc(MODE_SHORT[e.mode] || e.mode)}, ${intFmt(e.n_timed)} prompts per pipeline
       (+${intFmt(e.n_warmup)} warm-up), ${esc(e.machine?.gpu || "")}${e.measured_at ? `, ${esc(e.measured_at.slice(0, 10))}` : ""}</span>
       ${Object.entries(e.embeddings || {}).filter(([, v]) => v.error).map(([k, v]) =>
         `<span>${esc(k.toUpperCase())} not timed: ${esc(v.error.split(" - ")[0])}</span>`).join("")}
