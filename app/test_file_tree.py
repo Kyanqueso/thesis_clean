@@ -1,7 +1,4 @@
-"""Shape and arithmetic of runs.file_tree(), which the Files tab renders blind.
-
-Run: python -m app.test_file_tree   (or under pytest)
-"""
+"""Shape and counts of runs.file_tree(), which the Files tab renders blind. Run: python -m app.test_file_tree"""
 
 from pathlib import Path
 

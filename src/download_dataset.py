@@ -1,24 +1,19 @@
-import argparse
+"""Download the Alamsabi BIPIA+GPT dataset (pipeline 1) into the data folder."""
+
 import json
 import sys
 from pathlib import Path
+
+from datasets import load_dataset
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+import progress  # noqa: E402  (src/progress.py: the marker lines the dashboard's bars read)
 from pipeline_paths import DATA_DIR, DATASETS  # noqa: E402
 
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--out-dir", type=Path, default=DATA_DIR,
-                    help="Directory to write the dataset into.")
-args = parser.parse_args()
-
-from datasets import load_dataset  # heavy, and not needed for --help
-
-import progress  # src/progress.py: the marker lines the dashboard's bars read
-
-out_path = args.out_dir / DATASETS["pipeline1_alamsabi"]
+out_path = DATA_DIR / DATASETS["pipeline1_alamsabi"]
 out_path.parent.mkdir(parents=True, exist_ok=True)
 
 progress.mark("download", "Alamsabi BIPIA+GPT")

@@ -1,16 +1,4 @@
-"""qwen3 embeddings on a Vast.ai instance, over plain ssh/scp.
-
-Only the GPU step leaves this machine: the dataset goes up, the same
-src/generate_embeddings.py runs there, the .npy comes back, and training stays
-local. The instance is one you started in the Vast console; Settings holds its
-SSH command, and optionally an API key so it can be stopped when the work ends.
-
-    python -m app.vast embed --data data/x.jsonl --mode normal --embed-dir runs/.../embeddings
-
-The remote run is detached (nohup) and named after its inputs, so a dropped
-connection or a sleeping laptop does not lose it: running the same command
-again re-attaches to it, or just downloads the result if it finished meanwhile.
-"""
+"""qwen3 embeddings on a Vast.ai instance over ssh/scp: upload the dataset, embed there, download the .npy."""
 
 from __future__ import annotations
 
@@ -24,6 +12,8 @@ import sys
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -34,10 +24,10 @@ import progress  # noqa: E402  (src/progress.py)
 REMOTE_DIR = "thesis_embed"          # relative to the remote home
 NPY = "qwen3_prompt.npy"
 API = "https://console.vast.ai/api"
-# imported at the top of generate_embeddings.py, so needed even for qwen3 alone;
-# the pinned two decide the model code, torch is whatever the image ships (CUDA)
+# generate_embeddings.py imports all of these at the top, even for qwen3 alone
 REMOTE_PACKAGES = ["sentence-transformers", "transformers", "pandas", "tqdm",
                    "openai", "python-dotenv", "tiktoken"]
+# pinned to requirements.txt; torch is whatever CUDA build the image ships
 PINNED = ("sentence-transformers", "transformers")
 
 
@@ -52,8 +42,7 @@ def _env(name: str) -> str:
 # ---------------- ssh ----------------
 
 def parse_target(cmd: str) -> tuple[str, str, int]:
-    """(user, host, port) out of the console's 'ssh -p 12345 root@ssh4.vast.ai -L ...'.
-    Strict on purpose: these end up in an ssh argv."""
+    """(user, host, port) from the console's 'ssh -p 12345 root@ssh4.vast.ai'; strict, since it lands in an argv."""
     m = re.search(r"(?<![\w.-])([A-Za-z_][\w-]*)@([A-Za-z0-9][A-Za-z0-9.-]*)", cmd)
     if not m:
         raise ValueError("VAST_SSH: expected the SSH command from the Vast console, "
@@ -90,8 +79,7 @@ def _bin(name: str) -> str:
 
 
 def ssh(remote_cmd: str, timeout: float = 120, stream: bool = False) -> subprocess.CompletedProcess:
-    """Run one command on the instance. stream=True lets its output flow into
-    our stdout (the job log) instead of capturing it."""
+    """Run one command on the instance; stream=True sends its output to our stdout (the job log)."""
     user, host, port = target()
     argv = [_bin("ssh"), "-p", str(port), *_opts(), f"{user}@{host}", remote_cmd]
     if stream:
@@ -148,8 +136,7 @@ def test() -> dict:
 
 
 def kill_remote() -> None:
-    """Stop a detached embed run (cancel). ponytail: one job runs at a time, so
-    'every generate_embeddings on the box' is the right target."""
+    """End a detached embed run (on cancel); one job runs at a time, so every generate_embeddings goes."""
     ssh("pkill -f generate_embeddings.py", timeout=45)
 
 
@@ -168,8 +155,7 @@ def _api(method: str, path: str, **kw):
 
 
 def find_instance() -> int:
-    """The instance id to stop: the one from Settings, else whichever of the
-    account's instances the SSH command points at."""
+    """The instance to stop: the ID from Settings, else the account's instance the SSH command points at."""
     if _env("VAST_INSTANCE_ID"):
         return int(_env("VAST_INSTANCE_ID"))
     _, host, port = target()
@@ -209,14 +195,14 @@ def _pins() -> list[str]:
 
 
 def embed(data: Path, mode: str, embed_dir: Path, force: bool) -> int:
+    """Embed one dataset with qwen3 on the instance; the run is detached, so re-running re-attaches to it."""
     out = embed_dir / NPY
     if out.exists() and not force:
-        print(f"  ↪️  {NPY} already exists. Use --force to overwrite.")
+        print(f"  {NPY} already exists. Use --force to overwrite.")
         return 0
 
     size = data.stat().st_size
-    # ponytail: a dataset is identified by name + byte size, not a content hash;
-    # hash it if two different files of equal size ever share a name
+    # a remote dataset is identified by name + byte size, not a content hash
     rdata = f"{REMOTE_DIR}/data/{size}_{data.name}"
     run = f"{REMOTE_DIR}/runs/{data.stem}_{size}_{mode}"
     if not re.fullmatch(r"[\w./-]+", rdata):
@@ -230,15 +216,15 @@ def embed(data: Path, mode: str, embed_dir: Path, force: bool) -> int:
         f"stat -c %s {rdata} 2>/dev/null || echo 0"), "connect").split()[-2:]
 
     if state == "running":
-        print("  ↪️  re-attaching to the run already in progress on the instance")
+        print("  re-attaching to the run already in progress on the instance")
     elif state == "0":
-        print("  ↪️  the instance already finished this run; downloading it")
+        print("  the instance already finished this run; downloading it")
     else:
         progress.mark("upload", data.name)
         for f in ("generate_embeddings.py", "progress.py"):
             _scp(str(SRC / f), _remote(f"{REMOTE_DIR}/{f}"))
         if have != str(size):
-            print(f"  ⬆️  uploading {data.name} ({size / 1e6:.1f} MB)...", flush=True)
+            print(f"  uploading {data.name} ({size / 1e6:.1f} MB)...", flush=True)
             _scp(str(data), _remote(rdata))
 
         progress.mark("setup", "Python packages on the instance")
@@ -255,8 +241,7 @@ def embed(data: Path, mode: str, embed_dir: Path, force: bool) -> int:
         inner = (f"$PY -u generate_embeddings.py --data data/{size}_{data.name} --mode {mode} "
                  f"--embed-dir {rel}/out --models qwen3 --_single qwen3 --force; "
                  f"echo $? > {rel}/exit")
-        # only the nohup'd shell is backgrounded, with every stream redirected:
-        # anything else left holding the ssh channel would keep ssh from returning
+        # only the nohup'd shell is backgrounded, every stream redirected, or ssh would never return
         _ok(ssh(f"cd {REMOTE_DIR} && export PY={_PY} && rm -f {rel}/exit && "
                 f"( nohup sh -c {shlex.quote(inner)} > {rel}/log 2>&1 < /dev/null & "
                 f"echo $! > {rel}/pid )"), "start")
@@ -287,7 +272,7 @@ def embed(data: Path, mode: str, embed_dir: Path, force: bool) -> int:
             sys.stdout.flush()
 
     if state != "0":
-        print(f"\n  ❌ the remote embedding run failed (exit {state}); see its output above.")
+        print(f"\n  the remote embedding run failed (exit {state}); see its output above.")
         return 1
 
     progress.mark("download", NPY)
@@ -296,42 +281,32 @@ def embed(data: Path, mode: str, embed_dir: Path, force: bool) -> int:
     try:
         _scp(_remote(f"{run}/out/{NPY}"), str(part))
     except VastError as e:
-        # generate_embeddings exits 0 even when the model raised (it prints the
-        # error and moves on), so "no file" is how a failed run shows up here
+        # clear the exit marker so the next attempt re-runs instead of re-downloading nothing
         ssh(f"rm -f {run}/exit", timeout=45)
-        print(f"\n  ❌ no embeddings came back from the instance: {e}")
+        print(f"\n  no embeddings came back from the instance: {e}")
         return 1
     part.replace(out)
     ssh(f"rm -rf {run}", timeout=45)
-    print(f"  ✔️  Saved embeddings to: {out.name} ({out.stat().st_size / 1e6:.2f} MB, from Vast.ai)")
+    print(f"  Saved embeddings to: {out.name} ({out.stat().st_size / 1e6:.2f} MB, from Vast.ai)")
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # run by src/generate_embeddings.py as: python -m app.vast embed --data ... --mode ... --embed-dir ...
+    parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
     e = sub.add_parser("embed", help="Embed one dataset with qwen3 on the instance.")
     e.add_argument("--data", type=Path, required=True)
     e.add_argument("--mode", choices=["normal", "user_intent_only", "context_only"], required=True)
     e.add_argument("--embed-dir", type=Path, required=True)
     e.add_argument("--force", action="store_true")
-    sub.add_parser("test", help="Check the connection saved in Settings.")
-    sub.add_parser("stop", help="Stop the instance through the Vast API.")
     args = parser.parse_args()
 
-    from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
     try:
-        if args.cmd == "embed":
-            return embed(args.data, args.mode, args.embed_dir, args.force)
-        if args.cmd == "test":
-            res = test()
-            print(res["detail"])
-            return 0 if res["ok"] else 1
-        print(stop_instance())
-        return 0
+        return embed(args.data, args.mode, args.embed_dir, args.force)
     except VastError as e:
-        print(f"❌ Vast.ai: {e}")
+        print(f"Vast.ai error: {e}")
         return 1
 
 
