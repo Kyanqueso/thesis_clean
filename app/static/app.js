@@ -1542,7 +1542,7 @@ function renderResources() {
 let EX = null;
 const EX_ALPHA = 0.05;
 const EX_STATE = {
-  "mcnemar-card": { view: "within", mode: "normal", show: "all", sort: { col: null, dir: 0 } },
+  "mcnemar-card": { view: "linear", mode: "normal", show: "all", sort: { col: null, dir: 0 } },
   "ztest-block": { sop: "all", show: "all", sort: { col: null, dir: 0 } },
   "dup-block": { sort: { col: null, dir: 0 } },
 };
@@ -1577,16 +1577,66 @@ const MC_SIG = `Holm-corrected p below ${EX_ALPHA}: the two models (or modes) ge
 const Z_SIG = `Holm-corrected p below ${EX_ALPHA}: the two pipelines' accuracies differ by more than chance allows.`;
 const FOCUS_HINT = "pipelines follow the P1 / P2 / P3 filter above";
 
+/* Thesis Table 4.14: each linear model against each tree model on the same embedding (Pipeline 3, normal mode),
+   in the manuscript's row order and always as linear − tree. p (Holm) comes from all the model pairs in the run. */
+const T414_EMB = { openai: "OpenAI", qwen3: "Qwen3", minilm: "MiniLM" };
+const T414_LINEAR = { LogisticRegression: "LR", SVM: "SVM" };
+const T414_TREE = { XGBoost: "XGB", LightGBM: "LGBM", RandomForest: "RF" };
+const SUPERSCRIPT = { "-": "⁻", 0: "⁰", 1: "¹", 2: "²", 3: "³", 4: "⁴", 5: "⁵", 6: "⁶", 7: "⁷", 8: "⁸", 9: "⁹" };
+const pSci = (p) => {
+  if (typeof p !== "number") return "—";
+  if (p === 0) return "&lt; 10⁻³⁰⁰";
+  const [m, e] = p.toExponential(2).split("e");
+  return `${m} × 10${String(Number(e)).replace(/./g, (c) => SUPERSCRIPT[c])}`;
+};
+function t414Rows(run) {
+  const rows = [];
+  for (const [emb, Emb] of Object.entries(T414_EMB)) for (const [lin, Linear] of Object.entries(T414_LINEAR))
+    for (const [tree, Tree] of Object.entries(T414_TREE)) {
+      const l = `${emb}__${lin}`, t = `${emb}__${tree}`;
+      const r = run.find((x) => (x["Model-A"] === l && x["Model-B"] === t) || (x["Model-A"] === t && x["Model-B"] === l));
+      if (!r) continue;
+      const linFirst = r["Model-A"] === l;
+      rows.push({ Pipeline: r.Pipeline, Emb, Linear, Tree, p_holm: r.p_holm, significant: r.significant,
+        "Acc-Linear": linFirst ? r["Acc-A"] : r["Acc-B"], "Acc-Tree": linFirst ? r["Acc-B"] : r["Acc-A"],
+        Diff: linFirst ? r["Acc-Diff(A-B)"] : -r["Acc-Diff(A-B)"] });
+    }
+  return rows;
+}
+const MC_VIEW_PICK = ["view", "Compare", [
+  ["linear", "linear vs tree (Table 4.14)", "Each linear model against each tree model on the same embedding: Pipeline 3, normal mode, as in the manuscript."],
+  ["within", "model vs model", "Every pair of embedding × classifier, scored on the same test rows of one run (mcnemar_within_run.csv)."],
+  ["ablation", "mode vs mode", "The same embedding × classifier across the normal / intent-only / context-only runs (ablation_mcnemar.csv)."]]];
+
 // block id -> { picks: [[state key, label, [[value, text, tip]]]], rows, cols: [[header, field, tip, fmt(value, row)]],
 //               key, hint?, group? (row -> key; a new key draws a separator line) }
 const EX_CARDS = {
   "mcnemar-card": (s) => {
+    if (s.view === "linear") {
+      const run = EX.within.filter((r) => r.Pipeline === "pipeline3_organic_injected" && r.Mode === "normal");
+      const rows = t414Rows(run);
+      return {
+        picks: [MC_VIEW_PICK],
+        hint: "fixed to Pipeline 3, normal mode, as in Table 4.14",
+        rows,
+        group: (r) => r.Emb,
+        cols: [["Emb.", "Emb", COL_TIP.Emb],
+          ["Linear", "Linear", "LR = Logistic Regression, SVM = Support Vector Machine."],
+          ["Tree", "Tree", "XGB = XGBoost, LGBM = LightGBM, RF = Random Forest."],
+          ["Acc. (linear)", "Acc-Linear", "Accuracy of the linear model at the 0.5 threshold.", nFmt(4)],
+          ["Acc. (tree)", "Acc-Tree", "Accuracy of the tree model at the 0.5 threshold.", nFmt(4)],
+          ["Diff. (pp)", "Diff", "Linear accuracy − tree accuracy, in percentage points. Positive = the linear model was more accurate.", ppFmt],
+          ["p (Holm)", "p_holm", `McNemar p after Holm correction across all ${run.length} model pairs in this run.`, pSci]],
+        key: `<span>${rows.filter((r) => r.significant).length} of ${rows.length} comparisons significant at Holm α = ${EX_ALPHA}</span>
+          <span>Holm family = all ${run.length} model pairs in the run</span>
+          <span>McNemar tests accuracy at the 0.5 threshold on paired test rows</span>`,
+      };
+    }
     const within = s.view === "within";
     const all = (within ? EX.within.filter((r) => r.Mode === s.mode) : EX.ablation).filter((r) => PIPE_FOCUS.has(r.Pipeline));
     return {
       picks: [
-        ["view", "Compare", [["within", "model vs model", "Every pair of embedding × classifier, scored on the same test rows of one run (mcnemar_within_run.csv)."],
-                             ["ablation", "mode vs mode", "The same embedding × classifier across the normal / intent-only / context-only runs (ablation_mcnemar.csv)."]]],
+        MC_VIEW_PICK,
         ...(within ? [["mode", "Mode", EX_MODE_CHIPS]] : []),
         EX_SHOW(MC_SIG),
       ],
