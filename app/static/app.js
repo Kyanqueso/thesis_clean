@@ -2044,7 +2044,7 @@ $("#b-detect").addEventListener("click", async () => {
     setBtn(res.verdict, res.verdict === "malicious" ? "Detected MALICIOUS INTENT" : "Prompt is SAFE");
     const truth = $("#d-context").dataset.truth;
     detail.textContent =
-      `${(res.probability * 100).toFixed(1)}% confidence · embed ${res.embed_ms} ms · `
+      `${(res.probability * 100).toFixed(1)}% risk · embed ${res.embed_ms} ms · `
       + `classify ${res.classify_ms} ms · ${res.emb} + ${res.clf} trained on `
       + `${pShort(res.pipeline)}/${MODE_SHORT[res.mode]}`
       + (truth ? ` · dataset ground truth: ${truth === "1" ? "malicious" : "benign"}` : "");
